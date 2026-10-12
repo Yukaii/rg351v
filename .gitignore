@@ -1,0 +1,3 @@
+.storage/
+*.bak
+.DS_Store
