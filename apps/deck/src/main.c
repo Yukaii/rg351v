@@ -31,6 +31,23 @@
 #include <time.h>
 #include <unistd.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_JPEG
+#define STBI_NO_STDIO
+#define STBI_NO_LINEAR
+#define STBI_NO_HDR
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wmisleading-indentation"
+#pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
+#endif
+#include "stb_image.h"
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
 #define SCR_W 640
 #define SCR_H 480
 #define GW 8  /* glyph cell */
@@ -202,6 +219,7 @@ typedef struct {
   int online; /* deckd socket reachable */
   int connected; /* deckd has a Spotify session */
   char state[16], user[64], uri[128], title[256], artist[256], album[256];
+  char cover_file[160]; /* local JPEG fetched by deckd, empty until ready */
   uint32_t duration_ms, position_ms, volume; /* volume 0..65535 */
   int shuffle, repeat;
   uint64_t pos_at; /* mono_ms() when position_ms was received */
@@ -231,6 +249,7 @@ static void apply_kv(Model *m, const char *k, const char *v, uint64_t now_ms) {
   }
   else if (!strcmp(k, "artist")) snprintf(m->artist, sizeof m->artist, "%s", v);
   else if (!strcmp(k, "album")) snprintf(m->album, sizeof m->album, "%s", v);
+  else if (!strcmp(k, "cover_file")) snprintf(m->cover_file, sizeof m->cover_file, "%s", v);
   else if (!strcmp(k, "duration_ms")) m->duration_ms = (uint32_t)atoll(v);
   else if (!strcmp(k, "position_ms")) {
     m->position_ms = (uint32_t)atoll(v);
@@ -382,6 +401,84 @@ static void osk_press(void) {
     break;
   case 2: osk_submit(); break;
   default: view = V_MENU; break;
+  }
+}
+
+
+/* ---- real cover art -------------------------------------------------- */
+#define ART_N 192
+static uint8_t art_lv[ART_N * ART_N]; /* 0..3 phosphor level per pixel */
+static int art_ready;
+static char art_file[160];
+
+/* Decode a JPEG, scale to ART_N square (cover-fit), stretch contrast and
+ * dither to four phosphor levels with a 4x4 Bayer matrix. */
+static int load_art(const char *path) {
+  size_t n;
+  uint8_t *raw = read_file(path, &n);
+  if (!raw) return -1;
+  int w, h, ch;
+  uint8_t *img = stbi_load_from_memory(raw, (int)n, &w, &h, &ch, 3);
+  free(raw);
+  if (!img || w < 8 || h < 8) {
+    if (img) stbi_image_free(img);
+    return -1;
+  }
+  static float lum[ART_N * ART_N];
+  int side = w < h ? w : h; /* centre crop to a square */
+  int ox = (w - side) / 2, oy = (h - side) / 2;
+  for (int y = 0; y < ART_N; y++)
+    for (int x = 0; x < ART_N; x++) {
+      /* box filter over the source footprint (area average) */
+      int x0 = ox + x * side / ART_N, x1 = ox + (x + 1) * side / ART_N;
+      int y0 = oy + y * side / ART_N, y1 = oy + (y + 1) * side / ART_N;
+      if (x1 <= x0) x1 = x0 + 1;
+      if (y1 <= y0) y1 = y0 + 1;
+      unsigned long sum = 0, cnt = 0;
+      for (int yy = y0; yy < y1; yy++)
+        for (int xx = x0; xx < x1; xx++) {
+          const uint8_t *p = &img[((size_t)yy * w + xx) * 3];
+          sum += 299u * p[0] + 587u * p[1] + 114u * p[2];
+          cnt++;
+        }
+      lum[y * ART_N + x] = (float)sum / (float)(cnt * 1000);
+    }
+  stbi_image_free(img);
+  /* 2nd and 98th percentile contrast stretch */
+  int hist[256] = {0};
+  for (int i = 0; i < ART_N * ART_N; i++) hist[(int)lum[i] & 255]++;
+  int lo = 0, hi = 255, acc = 0, total = ART_N * ART_N;
+  for (int v = 0; v < 256; v++) {
+    acc += hist[v];
+    if (acc * 100 >= total * 2) { lo = v; break; }
+  }
+  acc = 0;
+  for (int v = 255; v >= 0; v--) {
+    acc += hist[v];
+    if (acc * 100 >= total * 2) { hi = v; break; }
+  }
+  if (hi - lo < 24) { lo = lo > 12 ? lo - 12 : 0; hi = lo + 24; }
+  static const uint8_t bayer[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+  for (int y = 0; y < ART_N; y++)
+    for (int x = 0; x < ART_N; x++) {
+      float v = (lum[y * ART_N + x] - (float)lo) / (float)(hi - lo);
+      v = v < 0 ? 0 : v > 1 ? 1 : v;
+      v = sqrtf(v); /* lift mid-tones: only four levels to spend */
+      float t = ((float)bayer[y & 3][x & 3] + 0.5f) / 16.f - 0.5f;
+      int l = (int)floorf(v * 3.f + 0.5f + t);
+      art_lv[y * ART_N + x] = (uint8_t)(l < 0 ? 0 : l > 3 ? 3 : l);
+    }
+  return 0;
+}
+
+static void draw_real_art(int x, int y) {
+  const uint32_t lv[4] = {T->bg, T->dim, T->mid, T->hi};
+  for (int j = 0; j < ART_N; j++) {
+    uint32_t *dst = &fb[(y + j) * SCR_W + x];
+    const uint8_t *src = &art_lv[j * ART_N];
+    for (int i = 0; i < ART_N; i++) dst[i] = lv[src[i]];
+    if ((j & 1) == 0) /* faint scanlines like the procedural cover */
+      for (int i = 0; i < ART_N; i++) dst[i] = (dst[i] & 0xFF000000) | ((dst[i] & 0x00FEFEFE) >> 1);
   }
 }
 
@@ -616,13 +713,22 @@ static void draw_now(uint64_t t_ms) {
   draw_header(t_ms);
   const int ax = 24, ay = 40;
   brackets(ax - 6, ay - 6, 192 + 12, 192 + 12, 14, T->mid);
-  draw_art(ax, ay, M.uri);
+  if (art_ready)
+    draw_real_art(ax, ay);
+  else
+    draw_art(ax, ay, M.uri);
 
   const int px = 256, pw = SCR_W - px - 24;
   if (!M.online) {
     text(px, ay, "DECKD OFFLINE", T->warn, 2);
     text(px, ay + 44, "The player service is not running.", T->mid, 1);
     text(px, ay + 64, "systemctl start rg351v-deckd", T->dim, 1);
+  } else if (!M.connected && M.user[0]) {
+    /* had a session: the link dropped (suspend, Wi-Fi) and deckd is
+     * re-establishing it; button presses are held and run once it is back */
+    text(px, ay, "RECONNECTING", T->accent, 2);
+    text(px, ay + 44, "Spotify session is coming back...", T->mid, 1);
+    text(px, ay + 64, "Play/skip pressed now runs when connected.", T->dim, 1);
   } else if (!M.connected) {
     text(px, ay, "NO SESSION", T->warn, 2);
     text(px, ay + 44, "Waiting for Spotify...", T->mid, 1);
@@ -982,6 +1088,7 @@ int main(void) {
   const uint64_t extra = getenv("DECK_T") ? (uint64_t)atoi(getenv("DECK_T")) : 0;
   M.pos_at = base;
   M.title_at = base;
+  if (getenv("DECK_COVER")) art_ready = load_art(getenv("DECK_COVER")) == 0;
   const char *vw = getenv("DECK_VIEW");
   if (vw) {
     static const char *const names[] = {"Anomalie bleue", "Hématome", "New notes",
@@ -1092,6 +1199,11 @@ int main(int argc, char **argv) {
       }
     } else {
       SDL_Delay(30);
+    }
+    if (strcmp(M.cover_file, art_file) != 0) {
+      snprintf(art_file, sizeof art_file, "%s", M.cover_file);
+      art_ready = M.cover_file[0] && load_art(M.cover_file) == 0;
+      dirty = 1;
     }
     if (now - last_sys > 5000) {
       last_sys = now;

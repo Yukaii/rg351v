@@ -84,6 +84,8 @@ struct State {
     artist: String,
     album: String,
     cover: String,
+    /// Local JPEG of the cover (fetched by deckd), empty until downloaded.
+    cover_file: String,
     duration_ms: u32,
     position_ms: u32,
     position_at: Instant,
@@ -106,6 +108,7 @@ impl State {
             artist: String::new(),
             album: String::new(),
             cover: String::new(),
+            cover_file: String::new(),
             duration_ms: 0,
             position_ms: 0,
             position_at: now,
@@ -145,6 +148,7 @@ impl State {
         kv("artist", &self.artist);
         kv("album", &self.album);
         kv("cover", &self.cover);
+        kv("cover_file", &self.cover_file);
         kv("duration_ms", &self.duration_ms.to_string());
         kv("position_ms", &self.position().to_string());
         kv("volume", &self.volume.to_string());
@@ -543,6 +547,56 @@ async fn list_albums(session: &Session, offset: usize) -> Result<String, String>
     }))
     .await;
     Ok(format!("page\t{offset}\t{total}\n{}", rows.concat()))
+}
+
+/// Download a cover image into /run/rg351v/covers (tmpfs) and return its path.
+async fn fetch_cover(session: &Session, url: &str) -> Result<String, String> {
+    let dir = format!("{RUN_DIR}/covers");
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    let mut h: u32 = 2166136261;
+    for b in url.bytes() {
+        h = (h ^ b as u32).wrapping_mul(16777619);
+    }
+    let path = format!("{dir}/{h:08x}.jpg");
+    if std::path::Path::new(&path).exists() {
+        return Ok(path);
+    }
+    let req = http::Request::builder()
+        .method("GET")
+        .uri(url)
+        .body(Bytes::new())
+        .map_err(|e| format!("request: {e}"))?;
+    let body = session
+        .http_client()
+        .request_body(req)
+        .await
+        .map_err(|e| format!("http: {e}"))?;
+    if body.len() < 100 {
+        return Err("short image".into());
+    }
+    fs::write(&path, &body).map_err(|e| format!("write: {e}"))?;
+    // Keep the newest few files only; /run is RAM.
+    if let Ok(rd) = fs::read_dir(&dir) {
+        let mut files: Vec<_> = rd
+            .flatten()
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+            .collect();
+        files.sort();
+        let excess = files.len().saturating_sub(24);
+        for (_, p) in files.into_iter().take(excess) {
+            let _ = fs::remove_file(p);
+        }
+    }
+    Ok(path)
+}
+
+/// The cover closest to ~300 px (the UI shows 192 px); URL or empty.
+fn pick_cover(item: &librespot_metadata::audio::AudioItem) -> String {
+    item.covers
+        .iter()
+        .min_by_key(|c| (c.width - 300).abs())
+        .map(|c| c.url.clone())
+        .unwrap_or_default()
 }
 
 /// GET https://api.spotify.com/v1/<path> with the session's own token.
@@ -963,6 +1017,10 @@ async fn main() {
     let mut reconnects: Vec<Instant> = vec![];
     let mut restore: Option<Restore> = None;
     let mut restore_at: Option<Instant> = None;
+    // A command pressed while the session was down; runs once it is back.
+    let mut pending: Option<(Cmd, Instant)> = None;
+    let mono_start = Instant::now();
+    let mut boot_off = boot_seconds();
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     let last_path = opts.cache.join("deckd-last");
     let mut last: Option<Last> = load_last(&last_path);
@@ -1032,7 +1090,7 @@ async fn main() {
                             .dealer()
                             .listen_for("hm://connect-state/v1/cluster", Message::from_raw::<ClusterUpdate>)
                             .ok();
-                        if restore.is_some() {
+                        if restore.is_some() || pending.is_some() {
                             restore_at = Some(Instant::now() + RESTORE_DELAY);
                         }
                     }
@@ -1086,6 +1144,22 @@ async fn main() {
             ev = player_events.recv() => {
                 match ev {
                     Some(ev) => {
+                        if let PlayerEvent::TrackChanged { audio_item } = &ev {
+                            let url = pick_cover(audio_item);
+                            state.lock().unwrap().cover_file.clear();
+                            if !url.is_empty() && !session.is_invalid() {
+                                let (se, st, tx) = (session.clone(), state.clone(), events_tx.clone());
+                                tokio::spawn(async move {
+                                    match fetch_cover(&se, &url).await {
+                                        Ok(path) => {
+                                            st.lock().unwrap().cover_file = path;
+                                            let _ = tx.send("cover".into());
+                                        }
+                                        Err(e) => warn!("cover: {e}"),
+                                    }
+                                });
+                            }
+                        }
                         let line = apply_event(&mut state.lock().unwrap(), &ev);
                         if matches!(
                             ev,
@@ -1153,16 +1227,11 @@ async fn main() {
                     }
                     (Some(cmd), Some(s)) => {
                         let idle = state.lock().unwrap().play == Play::Stopped;
-                        match (idle, matches!(cmd, Cmd::Play | Cmd::Toggle), last.clone()) {
-                            (true, true, Some(l)) => {
-                                // Nothing is loaded: pick up where playback
-                                // last stopped, from the device itself.
-                                info!("resuming {} at {} ms", l.track, l.position_ms);
-                                let _ = s.activate();
-                                let _ = s.load(resume_request(&l.context, &l.track, l.position_ms, true));
-                            }
-                            _ => run_cmd(s, cmd),
-                        }
+                        dispatch(s, cmd, idle, &last);
+                    }
+                    (Some(cmd), None) if queueable(&cmd) => {
+                        info!("session is down, holding {cmd:?} until it is back");
+                        pending = Some((cmd, Instant::now()));
                     }
                     _ => {}
                 }
@@ -1179,10 +1248,28 @@ async fn main() {
                 }
             },
             _ = tick.tick() => {
+                // A resume from suspend leaves a session the server has
+                // already dropped; do not wait for the ping timeout.
+                let off = boot_seconds() - mono_start.elapsed().as_secs_f64();
+                if off - boot_off > 2.0 {
+                    info!("resumed from suspend ({:.0} s), re-establishing the session", off - boot_off);
+                    if !connecting && !session.is_invalid() {
+                        session.shutdown();
+                    }
+                }
+                boot_off = off;
                 if let (Some(at), Some(s)) = (restore_at, spirc.as_ref()) {
                     if Instant::now() >= at {
                         restore_at = None;
-                        if let Some(r) = restore.take() {
+                        if let Some((c, t)) = pending.take() {
+                            if t.elapsed() < Duration::from_secs(120) {
+                                // What the user asked for beats an automatic restore.
+                                restore = None;
+                                let idle = state.lock().unwrap().play != Play::Playing;
+                                info!("running held command {c:?}");
+                                dispatch(s, c, idle, &last);
+                            }
+                        } else if let Some(r) = restore.take() {
                             // The player keeps playing a buffered track through
                             // an outage, but the new Connect session is idle:
                             // the phone cannot control it and no queue exists.
@@ -1284,6 +1371,35 @@ fn resume_request(context: &str, track: &str, position_ms: u32, play: bool) -> L
             },
         )
     }
+}
+
+/// Run a command on a live Spirc; when nothing is loaded, play/toggle pick up
+/// the last track instead.
+fn dispatch(s: &Spirc, cmd: Cmd, idle: bool, last: &Option<Last>) {
+    match (idle, matches!(cmd, Cmd::Play | Cmd::Toggle), last) {
+        (true, true, Some(l)) => {
+            info!("resuming {} at {} ms", l.track, l.position_ms);
+            let _ = s.activate();
+            let _ = s.load(resume_request(&l.context, &l.track, l.position_ms, true));
+        }
+        _ => run_cmd(s, cmd),
+    }
+}
+
+/// Commands worth holding while the session is down.
+fn queueable(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::Play | Cmd::Toggle | Cmd::Next | Cmd::Prev | Cmd::Load(_) | Cmd::PlayTrack { .. }
+    )
+}
+
+/// Seconds since boot including time spent suspended (CLOCK_BOOTTIME-like).
+fn boot_seconds() -> f64 {
+    fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|t| t.split_whitespace().next()?.parse().ok())
+        .unwrap_or(0.0)
 }
 
 fn run_cmd(s: &Spirc, cmd: Cmd) {

@@ -45,8 +45,19 @@ Premium); local-file playback is a separate, later project.
       [offset]` pages the collection service and resolves names with
       `Album::get`; `tracks spotify:album:<id>` lists an album (plays inside
       the album context). deck menu has ALBUMS.
-- [ ] On-device check of browsing; real album art; followed artists, saved
-      shows (same paging call, other set names), queue view.
+- [x] Real album art: deckd downloads the ~300 px cover into
+      `/run/rg351v/covers` (tmpfs, newest 24 kept) and reports it as
+      `cover_file`; deck decodes it with stb_image (JPEG only), centre-crops,
+      area-averages to 192x192, stretches contrast (2nd/98th percentile),
+      lifts mid-tones and dithers to the theme's four phosphor levels with a
+      4x4 Bayer matrix. The procedural cover shows until the file arrives.
+- [x] Persistent-session handling: deckd notices a resume from suspend
+      (/proc/uptime vs monotonic clock) and rebuilds the session at once
+      instead of waiting ~30 s for the websocket ping timeout; play/skip/load
+      pressed while the session is down are held (120 s) and run when it is
+      back; the UI says RECONNECTING instead of looking dead.
+- [ ] On-device check of art and reconnect; followed artists, saved shows
+      (same paging call, other set names), queue view.
 
 ## Constraints that shaped the design
 
