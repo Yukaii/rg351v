@@ -21,6 +21,9 @@ Notes, scripts and tweaks for my Anbernic RG351V running AmberELEC.
 - [x] Controls/exit documented in the Ports gamelist entry (move: dpad/stick,
   hit: face buttons, START: pause, hold L2+SELECT+START via jslisten to quit)
 - [x] Pikachu Volleyball verified playable; clean exit confirmed, ES stays smooth
+- [x] Monitoring: `scripts/perf.sh` (snapshot/watch) and
+  `scripts/battery-log.sh` (on-device sampler + awake/standby summary)
+- [ ] Measure real battery life on discharge (reading + standby)
 - [ ] Copy BIOS files / ROMs
 - [ ] Back up `/storage` (saves, configs) off-device
 - [ ] Decide on update strategy (AmberELEC releases)
@@ -114,4 +117,20 @@ Host rg351v
 - `scripts/ports/<name>/` – per-port `port.conf` (source dir, cmake args,
   install paths) and `launcher.sh`; start a new port with
   `cp -r scripts/ports/_template scripts/ports/<name>`. Currently: `pikaball`
+- `scripts/perf.sh [--watch [N]]` – power/CPU/GPU/thermal snapshot over SSH
+- `scripts/battery-log.sh start|mark|status|stop|pull|summary` – on-device CSV
+  sampler (`scripts/device/sample.sh`); the summary splits awake draw (mA, W,
+  runtime estimate) from standby drain (%/h), per `mark` segment
+- `scripts/lib/device.sh` – shared host/ssh/hostname-assert helpers
 - `.storage/` – git-ignored, for anything secret or machine-specific
+- Sleep: the power key runs a real kernel suspend (`mem`, logind
+  `HandlePowerKey=suspend`). Wi-Fi is a USB MT7601U dongle with no wake-on-WLAN,
+  and AmberELEC's `/usr/lib/systemd/system-sleep/sleep` hook unloads `dwc2`
+  (the USB controller) around suspend, so the network is down until resume.
+  A Wi-Fi-awake sleep therefore cannot be a kernel suspend.
+- Battery sampler caveats: capacity is whole-percent (1% ~ 34 mAh), so
+  standby drain needs hours of suspend to resolve. BusyBox here has `nohup`
+  but no `setsid`. Never `killall sh` on the device.
+- Tuning knobs exposed in sysfs: cpufreq (1008/1200/1248/1296 MHz, governors
+  incl. `powersave`/`schedutil`), GPU and DMC devfreq, backlight 0-100, Wi-Fi
+  power save (currently off). All reset on reboot.
