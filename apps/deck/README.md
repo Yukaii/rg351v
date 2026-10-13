@@ -41,7 +41,12 @@ Premium); local-file playback is a separate, later project.
       `search <offset> <query>`, `play <ctx|-> <track>`; deck has a library
       menu, scrolling lists with lazy paging and D-pad key-repeat, and an OSK
       for search (START from now-playing opens the library).
-- [ ] On-device check of browsing; real album art; albums/artists/queue.
+- [x] Saved albums (542 in the test account, newest first): deckd `albums
+      [offset]` pages the collection service and resolves names with
+      `Album::get`; `tracks spotify:album:<id>` lists an album (plays inside
+      the album context). deck menu has ALBUMS.
+- [ ] On-device check of browsing; real album art; followed artists, saved
+      shows (same paging call, other set names), queue view.
 
 ## Constraints that shaped the design
 
@@ -68,6 +73,11 @@ Spotify app / deck UI
    deck   (C, SDL3 KMSDRM)  = ptterm's renderer, fonts and on-screen keyboard
 ```
 
+- Saved albums: `POST /collection/v2/paging` with a hand-encoded
+  `PageRequest{username=1, set=2, pagination_token=3, limit=4}`; set
+  `collection` holds albums, the next page comes back as a token. The call is
+  rejected (400) with ANY `Content-Type` header, so send none. Debug probes
+  (`sp`, `merc`, `ctx`, `coll`, `web` in deckd) exist for exploring endpoints.
 - Browsing uses librespot's internal endpoints, not the Web API: the
   keymaster token route (`session.token_provider()`) now answers 403 "Invalid
   client" for librespot's client id (2026-10-13). Playlists come from

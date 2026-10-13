@@ -33,7 +33,7 @@ use librespot_core::dealer::protocol::Message;
 use librespot_core::{Session, SessionConfig, SpotifyUri};
 use librespot_discovery::Discovery;
 use librespot_metadata::audio::UniqueFields;
-use librespot_metadata::{Metadata, Playlist, Track};
+use librespot_metadata::{Album, Metadata, Playlist, Track};
 use librespot_playback::audio_backend;
 use librespot_protocol::connect::ClusterUpdate;
 use librespot_protocol::playlist4_external::SelectedListContent;
@@ -323,7 +323,9 @@ async fn context_tracks(session: &Session, ctx: &str) -> Result<(String, Vec<Str
         let uris = pl.tracks().filter_map(|t| t.to_uri().ok()).collect();
         return Ok((ctx.to_string(), uris));
     }
-    let uri = if ctx == "liked" {
+    let uri = if ctx.starts_with("spotify:album:") {
+        ctx.to_string()
+    } else if ctx == "liked" {
         format!("spotify:user:{}:collection", session.username())
     } else if let Some(q) = ctx.strip_prefix("search:") {
         format!("spotify:search:{}", q.replace(' ', "+"))
@@ -353,6 +355,194 @@ async fn list_tracks(session: &Session, ctx: &str, offset: usize) -> Result<Stri
     let slice: Vec<String> = uris.into_iter().skip(offset).take(PAGE).collect();
     let items = track_items(session, &slice).await;
     Ok(format!("page\t{offset}\t{total}\ncontext\t{play_ctx}\n{items}"))
+}
+
+fn put_varint(v: &mut Vec<u8>, mut n: u64) {
+    while n >= 0x80 {
+        v.push((n as u8 & 0x7F) | 0x80);
+        n >>= 7;
+    }
+    v.push(n as u8);
+}
+
+/// spotify.collection.proto.v2.PageRequest, hand-encoded: the generated
+/// type is not worth a dependency for three fields.
+fn encode_page_request(user: &str, set: &str, token: &str, limit: u32) -> Vec<u8> {
+    let mut v = Vec::new();
+    for (tag, val) in [(0x0Au8, user), (0x12, set), (0x1A, token)] {
+        if val.is_empty() {
+            continue;
+        }
+        v.push(tag);
+        put_varint(&mut v, val.len() as u64);
+        v.extend_from_slice(val.as_bytes());
+    }
+    if limit > 0 {
+        v.push(0x20);
+        put_varint(&mut v, limit as u64);
+    }
+    v
+}
+
+/// Read a varint from `b[*i..]`.
+fn get_varint(b: &[u8], i: &mut usize) -> Option<u64> {
+    let mut n = 0u64;
+    let mut shift = 0;
+    while *i < b.len() {
+        let x = b[*i];
+        *i += 1;
+        n |= ((x & 0x7F) as u64) << shift;
+        if x & 0x80 == 0 {
+            return Some(n);
+        }
+        shift += 7;
+        if shift > 63 {
+            return None;
+        }
+    }
+    None
+}
+
+/// Fields of one length-delimited protobuf message: (field number, payload).
+fn pb_fields(b: &[u8]) -> Vec<(u32, &[u8])> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let Some(key) = get_varint(b, &mut i) else { break };
+        let (field, wire) = ((key >> 3) as u32, key & 7);
+        match wire {
+            0 => {
+                if get_varint(b, &mut i).is_none() {
+                    break;
+                }
+            }
+            2 => {
+                let Some(len) = get_varint(b, &mut i) else { break };
+                let end = i + len as usize;
+                if end > b.len() {
+                    break;
+                }
+                out.push((field, &b[i..end]));
+                i = end;
+            }
+            1 => i += 8,
+            5 => i += 4,
+            _ => break,
+        }
+    }
+    out
+}
+
+/// One page of the user's collection set: ((item URI, added_at), next token).
+/// The endpoint rejects any Content-Type, so none is sent.
+async fn collection_page(
+    session: &Session,
+    set: &str,
+    token: &str,
+    limit: u32,
+) -> Result<(Vec<(String, i64)>, String), String> {
+    let body = encode_page_request(&session.username(), set, token, limit);
+    let resp = session
+        .spclient()
+        .request(&http::Method::POST, "/collection/v2/paging", None, Some(&body))
+        .await
+        .map_err(|e| format!("collection: {e}"))?;
+    let mut items = Vec::new();
+    let mut next = String::new();
+    for (field, payload) in pb_fields(&resp) {
+        match field {
+            1 => {
+                // CollectionItem: uri = 1, added_at = 2 (int32 varint)
+                let mut uri = String::new();
+                let mut added = 0i64;
+                let mut i = 0;
+                while i < payload.len() {
+                    let Some(key) = get_varint(payload, &mut i) else { break };
+                    match (key >> 3, key & 7) {
+                        (1, 2) => {
+                            let Some(len) = get_varint(payload, &mut i) else { break };
+                            let end = (i + len as usize).min(payload.len());
+                            uri = String::from_utf8_lossy(&payload[i..end]).to_string();
+                            i = end;
+                        }
+                        (_, 0) => {
+                            let Some(v) = get_varint(payload, &mut i) else { break };
+                            if key >> 3 == 2 {
+                                added = v as i64;
+                            }
+                        }
+                        (_, 2) => {
+                            let Some(len) = get_varint(payload, &mut i) else { break };
+                            i += len as usize;
+                        }
+                        (_, 1) => i += 8,
+                        (_, 5) => i += 4,
+                        _ => break,
+                    }
+                }
+                if !uri.is_empty() {
+                    items.push((uri, added));
+                }
+            }
+            2 => next = String::from_utf8_lossy(payload).to_string(),
+            _ => {}
+        }
+    }
+    Ok((items, next))
+}
+
+type AlbumCache = Mutex<Option<(Instant, Vec<String>)>>;
+
+fn album_cache() -> &'static AlbumCache {
+    static C: std::sync::OnceLock<AlbumCache> = std::sync::OnceLock::new();
+    C.get_or_init(|| Mutex::new(None))
+}
+
+/// Saved album URIs, newest first (cached for a couple of minutes).
+async fn saved_albums(session: &Session) -> Result<Vec<String>, String> {
+    if let Some((at, v)) = album_cache().lock().unwrap().as_ref() {
+        if at.elapsed() < Duration::from_secs(120) {
+            return Ok(v.clone());
+        }
+    }
+    let mut all: Vec<(String, i64)> = Vec::new();
+    let mut token = String::new();
+    for _ in 0..40 {
+        let (items, next) = collection_page(session, "collection", &token, 200).await?;
+        all.extend(items.into_iter().filter(|(u, _)| u.starts_with("spotify:album:")));
+        if next.is_empty() {
+            break;
+        }
+        token = next;
+    }
+    all.sort_by(|a, b| b.1.cmp(&a.1));
+    let uris: Vec<String> = all.into_iter().map(|(u, _)| u).collect();
+    *album_cache().lock().unwrap() = Some((Instant::now(), uris.clone()));
+    Ok(uris)
+}
+
+async fn list_albums(session: &Session, offset: usize) -> Result<String, String> {
+    let uris = saved_albums(session).await?;
+    let total = uris.len();
+    let slice: Vec<String> = uris.into_iter().skip(offset).take(PAGE).collect();
+    let rows = join_all(slice.iter().map(|u| async move {
+        let named = async {
+            let id = SpotifyUri::from_uri(u).ok()?;
+            let a = Album::get(session, &id).await.ok()?;
+            let artists = a
+                .artists
+                .iter()
+                .map(|x| x.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some((a.name, artists))
+        }
+        .await;
+        let (name, artist) = named.unwrap_or_else(|| (u.clone(), String::new()));
+        format!("item\talbum\t{u}\t{}\t{}\n", clean(&name), clean(&artist))
+    }))
+    .await;
+    Ok(format!("page\t{offset}\t{total}\n{}", rows.concat()))
 }
 
 /// GET https://api.spotify.com/v1/<path> with the session's own token.
@@ -552,6 +742,16 @@ async fn serve_client(
                         },
                         Err(e) => format!("ERR {e}\n"),
                     },
+                    q if q == "albums" || q.starts_with("albums ") => {
+                        let off = q[6..].trim().parse().unwrap_or(0);
+                        match session_of(&sess) {
+                            Ok(se) => match list_albums(&se, off).await {
+                                Ok(b) => format!("{b}.\n"),
+                                Err(e) => format!("ERR {}\n", clean(&e)),
+                            },
+                            Err(e) => format!("ERR {e}\n"),
+                        }
+                    }
                     q if q.starts_with("tracks ") => {
                         let mut it = q[7..].split_whitespace();
                         let ctx = it.next().unwrap_or("").to_string();
@@ -579,6 +779,62 @@ async fn serve_client(
                             Err(e) => format!("ERR {e}\n"),
                         }
                     }
+                    // Debug probes for exploring internal endpoints.
+                    cl if cl.starts_with("coll ") => match session_of(&sess) {
+                        Ok(se) => {
+                            let mut it = cl[5..].split_whitespace();
+                            let set = it.next().unwrap_or("collection");
+                            let limit = it.next().and_then(|v| v.parse().ok()).unwrap_or(100);
+                            match collection_page(&se, set, "", limit).await {
+                                Ok((items, next)) => format!(
+                                    "set {set}: {} items next={} first={:?}\n.\n",
+                                    items.len(),
+                                    clean(&next),
+                                    items.first()
+                                ),
+                                Err(e) => format!("ERR {}\n", clean(&e)),
+                            }
+                        }
+                        Err(e) => format!("ERR {e}\n"),
+                    },
+                    sp if sp.starts_with("sp ") => match session_of(&sess) {
+                        Ok(se) => match se
+                            .spclient()
+                            .request(&http::Method::GET, sp[3..].trim(), None, None)
+                            .await
+                        {
+                            Ok(b) => {
+                                let t = String::from_utf8_lossy(&b).to_string();
+                                format!("{} bytes: {}\n.\n", b.len(), clean(&t.chars().take(1500).collect::<String>()))
+                            }
+                            Err(e) => format!("ERR {}\n", clean(&e.to_string())),
+                        },
+                        Err(e) => format!("ERR {e}\n"),
+                    },
+                    mc if mc.starts_with("merc ") => match session_of(&sess) {
+                        Ok(se) => match se.mercury().get(mc[5..].trim().to_string()) {
+                            Ok(fut) => match fut.await {
+                                Ok(r) => {
+                                    let p = r.payload.first().map(|b| String::from_utf8_lossy(b).to_string()).unwrap_or_default();
+                                    format!("status {} parts {}: {}\n.\n", r.status_code, r.payload.len(), clean(&p.chars().take(1500).collect::<String>()))
+                                }
+                                Err(e) => format!("ERR {}\n", clean(&e.to_string())),
+                            },
+                            Err(e) => format!("ERR {}\n", clean(&e.to_string())),
+                        },
+                        Err(e) => format!("ERR {e}\n"),
+                    },
+                    cx if cx.starts_with("ctx ") => match session_of(&sess) {
+                        Ok(se) => match se.spclient().get_context(cx[4..].trim()).await {
+                            Ok(c) => {
+                                let n: usize = c.pages.iter().map(|p| p.tracks.len()).sum();
+                                let first = c.pages.iter().flat_map(|p| p.tracks.iter()).next().map(|t| t.uri().to_string()).unwrap_or_default();
+                                format!("uri {} pages {} tracks {} first {}\n.\n", c.uri(), c.pages.len(), n, first)
+                            }
+                            Err(e) => format!("ERR {}\n", clean(&e.to_string())),
+                        },
+                        Err(e) => format!("ERR {e}\n"),
+                    },
                     web if web.starts_with("web ") => {
                         // Debug probe: raw Web API JSON on one line.
                         match web_get(&sess, web[4..].trim()).await {

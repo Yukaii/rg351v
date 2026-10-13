@@ -190,6 +190,10 @@ Host rg351v
   `AUTOSLEEP_CONF=... autosleep.py --once` plus `echo +100 > wakealarm`. While
   it is installed the device suspends ~5 min after the last button press, so
   SSH from the Mac drops until the power key wakes it.
+- Spotify collection API: `/collection/v2/paging` answers 405 to GET and 400
+  to any POST that carries a Content-Type (even application/x-protobuf); the
+  same body with no Content-Type returns the page. Shell note: in zsh
+  `$U:collection` expands `:c` as a history modifier, use `${U}`.
 - Spotify (deckd): a fresh `cargo` resolve of librespot 0.8.0 picks a vergen
   that fails to build, so `apps/deckd/Cargo.lock` is seeded from the
   librespot-0.8.0 crate and builds use `--locked`. Default features pull

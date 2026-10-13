@@ -257,7 +257,7 @@ static uint32_t mix(uint32_t h) {
 static void send_cmd(const char *line);
 
 typedef struct {
-  char kind; /* 'p' playlist, 't' track */
+  char kind; /* 'p' playlist, 'a' album, 't' track */
   char uri[96];
   char title[160];
   char sub[96];
@@ -296,6 +296,8 @@ static void list_request(int more) {
   int off = more ? n_items : 0;
   if (!strcmp(list_ctx, "playlists"))
     snprintf(cmd, sizeof cmd, "playlists");
+  else if (!strcmp(list_ctx, "albums"))
+    snprintf(cmd, sizeof cmd, "albums %d", off);
   else if (!strncmp(list_ctx, "search:", 7))
     snprintf(cmd, sizeof cmd, "search %d %s", off, list_ctx + 7);
   else
@@ -491,15 +493,16 @@ static void draw_scrollbar(int x, int y, int h, int n, int top_i, int rows) {
 
 static void draw_menu(uint64_t t_ms) {
   draw_header(t_ms);
-  static const char *const ENT[4] = {"LIKED SONGS", "PLAYLISTS", "SEARCH", "NOW PLAYING"};
-  static const char *const DESC[4] = {"your saved tracks", "your library lists",
-                                      "find tracks by name", "back to the player"};
-  text(24, 40, "LIBRARY", T->accent, 1);
-  for (int i = 0; i < 4; i++) {
-    int y = 80 + i * 72;
+  static const char *const ENT[5] = {"LIKED SONGS", "ALBUMS", "PLAYLISTS", "SEARCH", "NOW PLAYING"};
+  static const char *const DESC[5] = {"your saved tracks", "albums you saved, newest first",
+                                      "your library lists", "find tracks by name",
+                                      "back to the player"};
+  text(24, 38, "LIBRARY", T->accent, 1);
+  for (int i = 0; i < 5; i++) {
+    int y = 64 + i * 76;
     if (i == menu_sel) {
-      fill(16, y - 10, SCR_W - 32, 60, 0xFF14110A);
-      brackets(16, y - 10, SCR_W - 32, 60, 12, T->hi);
+      fill(16, y - 8, SCR_W - 32, 66, 0xFF14110A);
+      brackets(16, y - 8, SCR_W - 32, 66, 12, T->hi);
     }
     text(40, y, ENT[i], i == menu_sel ? T->hi : T->mid, 2);
     text(40, y + 34, DESC[i], T->dim, 1);
@@ -530,7 +533,7 @@ static void draw_list(uint64_t t_ms) {
     int cur = idx == sel;
     if (cur) fill(12, y - 2, SCR_W - 32, LIST_RH, T->dim);
     const Item *it = &items[idx];
-    text(18, y, it->kind == 'p' ? "=" : ">", cur ? T->hi : T->dim, 1);
+    text(18, y, it->kind == 'p' ? "=" : it->kind == 'a' ? "#" : ">", cur ? T->hi : T->dim, 1);
     int tw = it->sub[0] ? 380 : 580;
     if (cur)
       marquee(34, y, tw, it->title, T->hi, 1, since_sel);
@@ -744,7 +747,7 @@ static int conn_read(uint64_t now_ms) {
       }
       if (n_items < MAX_ITEMS && f[0] && f[1] && f[2]) {
         Item *it = &items[n_items++];
-        it->kind = f[0][0] == 'p' ? 'p' : 't';
+        it->kind = f[0][0] == 'p' ? 'p' : f[0][0] == 'a' ? 'a' : 't';
         snprintf(it->uri, sizeof it->uri, "%s", f[1]);
         snprintf(it->title, sizeof it->title, "%s", f[2]);
         snprintf(it->sub, sizeof it->sub, "%s", f[3] ? f[3] : "");
@@ -874,14 +877,15 @@ static void handle_press(int b, uint64_t now) {
   const int START = SDL_GAMEPAD_BUTTON_START;
 
   if (view == V_MENU) {
-    if (b == UP) menu_sel = (menu_sel + 3) % 4;
-    else if (b == DN) menu_sel = (menu_sel + 1) % 4;
+    if (b == UP) menu_sel = (menu_sel + 4) % 5;
+    else if (b == DN) menu_sel = (menu_sel + 1) % 5;
     else if (b == B || b == START) view = V_NOW;
     else if (b == A) {
       depth = 0;
       if (menu_sel == 0) open_list("liked", "LIKED SONGS");
-      else if (menu_sel == 1) open_list("playlists", "PLAYLISTS");
-      else if (menu_sel == 2) { search_q[0] = 0; osk_r = osk_c = 0; view = V_OSK; }
+      else if (menu_sel == 1) open_list("albums", "ALBUMS");
+      else if (menu_sel == 2) open_list("playlists", "PLAYLISTS");
+      else if (menu_sel == 3) { search_q[0] = 0; osk_r = osk_c = 0; view = V_OSK; }
       else view = V_NOW;
     }
     return;
@@ -908,7 +912,7 @@ static void handle_press(int b, uint64_t now) {
     else if (b == START) view = V_NOW;
     else if (b == A && sel < n_items) {
       const Item *it = &items[sel];
-      if (it->kind == 'p') {
+      if (it->kind != 't') {
         push_list(it->uri, it->title);
       } else {
         snprintf(cmd, sizeof cmd, "play %s %s", play_ctx[0] ? play_ctx : "-", it->uri);
@@ -917,7 +921,7 @@ static void handle_press(int b, uint64_t now) {
       }
     } else if (b == X) {
       const char *c = NULL;
-      if (n_items && sel < n_items && items[sel].kind == 'p') c = items[sel].uri;
+      if (n_items && sel < n_items && items[sel].kind != 't') c = items[sel].uri;
       else if (play_ctx[0] && strcmp(play_ctx, "-") != 0) c = play_ctx;
       if (c) {
         snprintf(cmd, sizeof cmd, "load %s", c);
@@ -985,14 +989,14 @@ int main(void) {
                                         "STORM I", "Last Train to London", "Veridis Quo"};
     for (int i = 0; i < 30; i++) {
       Item *it = &items[n_items++];
-      it->kind = !strcmp(vw, "playlists") ? 'p' : 't';
+      it->kind = !strcmp(vw, "playlists") ? 'p' : !strcmp(vw, "albums") ? 'a' : 't';
       snprintf(it->uri, sizeof it->uri, "spotify:track:%d", i);
       snprintf(it->title, sizeof it->title, "%s", names[i % 7]);
       snprintf(it->sub, sizeof it->sub, it->kind == 'p' ? "%d tracks" : "Artist %d", 10 + i);
     }
     total_items = 2928;
     sel = 4;
-    snprintf(list_title, sizeof list_title, "%s", !strcmp(vw, "playlists") ? "PLAYLISTS" : "LIKED SONGS");
+    snprintf(list_title, sizeof list_title, "%s", !strcmp(vw, "playlists") ? "PLAYLISTS" : !strcmp(vw, "albums") ? "ALBUMS" : "LIKED SONGS");
     if (!strcmp(vw, "menu")) { view = V_MENU; menu_sel = 1; }
     else if (!strcmp(vw, "osk")) { view = V_OSK; snprintf(search_q, sizeof search_q, "daft pun"); osk_r = 1; osk_c = 3; }
     else view = V_LIST;
