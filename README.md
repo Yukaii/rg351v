@@ -32,6 +32,9 @@ Notes, scripts and tweaks for my Anbernic RG351V running AmberELEC.
 - [x] Auto-suspend (`scripts/autosleep.sh install [minutes]`): on-device
   watcher suspends after N minutes without input; verified suspend + RTC wake
   cycle (2026-10-13), installed at 5 min
+- [x] Spotify Connect speaker (`scripts/spotify.sh install`): librespot 0.8.0
+  as a systemd service, plays through ALSA; first login pending from a phone
+  (design and roadmap in `apps/deck/README.md`)
 - [ ] Copy BIOS files / ROMs
 - [ ] Back up `/storage` (saves, configs) off-device
 - [ ] Decide on update strategy (AmberELEC releases)
@@ -157,6 +160,9 @@ Host rg351v
 - `scripts/autosleep.sh install|uninstall|set|status` – idle auto-suspend
   service (`scripts/device/autosleep.py`, unit in `/storage/.config/system.d`,
   config `/storage/.config/rg351v/autosleep.conf`: `IDLE_MINUTES`, `0` = off)
+- `scripts/spotify.sh build|install|uninstall|status|logout` – librespot
+  Spotify Connect service (`scripts/device/rg351v-librespot.service`, event
+  hook `librespot-event.sh`); the `deck` player design is in `apps/deck/`
 - `scripts/lib/device.sh` – shared host/ssh/hostname-assert helpers
 - `.storage/` – git-ignored, for anything secret or machine-specific
 - PocketJS cost (2026-10-13, `hero` demo, 960x544 raster, headless): boot
@@ -178,6 +184,13 @@ Host rg351v
   `AUTOSLEEP_CONF=... autosleep.py --once` plus `echo +100 > wakealarm`. While
   it is installed the device suspends ~5 min after the last button press, so
   SSH from the Mac drops until the power key wakes it.
+- Spotify: librespot must be built with `with-libmdns`; without it discovery
+  is compiled out and it exits with "Credentials are required if discovery
+  and oauth login are disabled". Audio is plain ALSA (no PulseAudio): the
+  default device is a `dmix` shared with ES. Never `pkill -f <path>` over
+  SSH: the remote shell's own command line matches and the session dies; use
+  `kill $(pidof name)`. Suspend stops playback (Wi-Fi drops), so
+  `autosleep.py` skips while `/run/rg351v/playing` exists and librespot runs.
 - Sleep: the power key runs a real kernel suspend (`mem`, logind
   `HandlePowerKey=suspend`). Wi-Fi is a USB MT7601U dongle with no wake-on-WLAN,
   and AmberELEC's `/usr/lib/systemd/system-sleep/sleep` hook unloads `dwc2`
