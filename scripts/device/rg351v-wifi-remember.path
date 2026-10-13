@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch the ES Wi-Fi config so saved networks are remembered
+
+[Path]
+PathChanged=/storage/.cache/connman/wifi.config
+Unit=rg351v-wifi-remember.service
+
+[Install]
+WantedBy=multi-user.target

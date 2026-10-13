@@ -1,0 +1,9 @@
+[Unit]
+Description=Remember the Wi-Fi network saved from the ES menu
+
+[Service]
+Type=oneshot
+# batocera-config writes wifi.config in two steps (name, then passphrase);
+# wait so we read the finished file.
+ExecStartPre=/usr/bin/sleep 2
+ExecStart=/bin/sh /storage/.config/rg351v/wifi-remember.sh run
