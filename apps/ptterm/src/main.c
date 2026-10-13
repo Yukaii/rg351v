@@ -409,11 +409,20 @@ static void feed_byte(uint8_t b) {
 }
 
 /* ---- rendering -------------------------------------------------------- */
-static const uint32_t PAL[16] = {
+/* Colors are 0xAARRGGBB in ANSI order. Backgrounds stay dark so light text on
+ * them (PTT's blue title bars) keeps its contrast; foregrounds are lifted so
+ * dark red/blue/yellow text is readable on this small LCD (all >= 5:1 on black;
+ * the VGA values were as low as 2.6:1). PTTERM_PALETTE=vga restores the old
+ * foregrounds. */
+static const uint32_t PAL_BG[16] = {
     0xFF000000, 0xFFAA0000, 0xFF00AA00, 0xFFAA5500, 0xFF3030DD, 0xFFAA00AA,
     0xFF00AAAA, 0xFFAAAAAA, 0xFF555555, 0xFFFF5555, 0xFF55FF55, 0xFFFFFF55,
     0xFF6C6CFF, 0xFFFF55FF, 0xFF55FFFF, 0xFFFFFFFF};
-/* PAL entries are 0xAARRGGBB; index 1 is red, 4 is blue (ANSI order). */
+static const uint32_t PAL_FG_BRIGHT[16] = {
+    0xFF000000, 0xFFE05050, 0xFF50D060, 0xFFE6D23C, 0xFF5A8CFF, 0xFFD264D2,
+    0xFF3CC8DC, 0xFFE5E5E5, 0xFF828282, 0xFFFF6B6B, 0xFF6BFF6B, 0xFFFFFF70,
+    0xFF6EA0FF, 0xFFFF80FF, 0xFF70F0FF, 0xFFFFFFFF};
+static const uint32_t *pal_fg = PAL_FG_BRIGHT;
 
 static uint32_t fb[SCR_W * SCR_H];
 
@@ -481,7 +490,7 @@ static void render(int blink_on, int show_cursor, int full) {
         fgi = bgi;
         bgi = t;
       }
-      uint32_t fg = PAL[fgi & 15], bg = PAL[bgi & 15];
+      uint32_t fg = pal_fg[fgi & 15], bg = PAL_BG[bgi & 15];
       uint16_t cp = cell->cp;
       if ((cell->flags & F_BLINK) && !blink_on) cp = 0;
       if (show_cursor && blink_on && r == cur_r && c == cur_c) {
@@ -731,6 +740,10 @@ int main(int argc, char **argv) {
   if (!base) base = "./";
   if (load_assets(base) != 0) return 1;
   init_tables();
+  {
+    const char *pal = getenv("PTTERM_PALETTE");
+    if (pal && strcmp(pal, "vga") == 0) pal_fg = PAL_BG;
+  }
 
   char kh[1100];
   snprintf(kh, sizeof kh, "UserKnownHostsFile=%sknown_hosts", base);

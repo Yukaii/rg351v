@@ -196,6 +196,10 @@ Host rg351v
   `/storage` itself is not shared; keep secrets there, never under roms.
 - ptterm env knobs: `PTTERM_ENCODING=utf8|big5`, `PTTERM_ACCOUNT=<file>`,
   `PTTERM_AUTOLOGIN=1`, `PTTERM_DUMP=<file>` (screen text on exit),
-  `PTTERM_PROF=1` (per-phase timing on exit; the launcher enables it, output
+  `PTTERM_PALETTE=vga` (old dim foregrounds), `PTTERM_PROF=1` (per-phase
+  timing on exit; the launcher enables it, output
   lands in /tmp/logs/ptterm.log). SDL's `offscreen` driver uses a slow
   software renderer, so headless CPU numbers overstate the real KMSDRM cost.
+- ptterm real-session cost (KMSDRM/GLES): ~1% of one core, battery draw equals
+  the ~440 mA idle floor. Foreground palette is lifted (>= 5:1 contrast on
+  black) while backgrounds stay dark, because PTT puts white text on blue bars.
