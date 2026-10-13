@@ -29,7 +29,16 @@ Premium); local-file playback is a separate, later project.
       (TCP and the websocket often ride it out), so `reconnect` is the
       deterministic test.
 - [ ] Context-level restore, playlists/search/library browsing (metadata).
-- [ ] Step 3: `deck`, the SDL3 UI.
+- [x] Step 3 (v0): `deck` (apps/deck), the SDL3 now-playing UI in the
+      Homebrew menu as "Spotify": title/artist/album with marquee, progress,
+      time, shuffle/repeat, volume, procedural cover, animated spectrum,
+      battery and Wi-Fi in the header, backlight blanking while idle
+      (`DECK_BLANK_SECS`, default 60), CJK titles via Unifont. Host-side
+      preview: `cc -DDECK_NO_SDL apps/deck/src/main.c -lm` then
+      `DECK_ASSETS=.storage/ptterm-data DECK_DUMP=out.ppm ./a.out`.
+- [ ] On-device check of deck v0 (input, blanking, exit combo, CPU).
+- [ ] Library browsing: playlists, liked songs, search (needs deckd metadata
+      commands), real album art.
 
 ## Constraints that shaped the design
 
@@ -77,8 +86,10 @@ Spotify app / deck UI
 
 - Near-black background, one phosphor accent (amber default; green or cyan
   selectable), block-character borders, optional scanlines (off by default).
-- D-pad moves, A plays/enters, B back, Y search (OSK from ptterm), X queue,
-  L1/R1 skip, L2/R2 volume, Start pause, Select menu.
+- v0 controls: A play/pause, L1/R1 prev/next, D-pad left/right seek +-10 s,
+  D-pad up/down or R2/L2 volume +-5, X shuffle, Y repeat, SELECT+START leave.
+  Planned with browsing: D-pad moves lists, A plays/enters, B back, Y search
+  (OSK from ptterm), X queue.
 - Backlight blanks after a UI idle timeout and wakes on any button; music
   keeps playing.
 - Offline is out of scope: Spotify downloads are DRM-bound to its own

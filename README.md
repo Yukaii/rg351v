@@ -165,6 +165,10 @@ Host rg351v
   `deckd` Spotify Connect service (`apps/deckd`,
   `scripts/device/rg351v-deckd.service`); the `deck` player design is in
   `apps/deck/`
+- `apps/deck/` + `scripts/ports/deck/` – deck, the Spotify now-playing UI
+  (SDL3, Unifont, remote control for deckd). Build and deploy with
+  `scripts/build-port.sh deck && scripts/deploy-port.sh deck`; it shares
+  `.storage/ptterm-data/unifont.bin` with ptterm
 - `scripts/lib/device.sh` – shared host/ssh/hostname-assert helpers
 - `.storage/` – git-ignored, for anything secret or machine-specific
 - PocketJS cost (2026-10-13, `hero` demo, 960x544 raster, headless): boot
@@ -195,6 +199,11 @@ Host rg351v
   Wi-Fi link (-65..-85 dBm) can drop the dealer websocket; librespot then
   reconnects in ~1 s as an idle device and the phone loses control, which is
   what deckd's restore addresses.
+- deck UI clocks: `Model.pos_at`/`title_at` are absolute `mono_ms()`, so
+  `draw_screen()` must get the same absolute time. Passing time since app
+  start made the elapsed term underflow and pinned the progress bar to the
+  end on the device (invisible in the host preview, whose clock started at 0:
+  the preview now uses a large absolute base so this class of bug shows).
 - Spotify (plain librespot): it must be built with `with-libmdns`; without it discovery
   is compiled out and it exits with "Credentials are required if discovery
   and oauth login are disabled". Audio is plain ALSA (no PulseAudio): the

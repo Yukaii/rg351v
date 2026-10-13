@@ -13,6 +13,7 @@ license = "MIT"
 # rustls, as in the librespot build: the device has no OpenSSL 3.
 librespot-core = { version = "0.8.0", default-features = false, features = ["rustls-tls-native-roots"] }
 librespot-connect = { version = "0.8.0", default-features = false }
+librespot-protocol = { version = "0.8.0" }
 librespot-metadata = { version = "0.8.0", default-features = false }
 librespot-playback = { version = "0.8.0", default-features = false, features = ["alsa-backend"] }
 librespot-discovery = { version = "0.8.0", default-features = false, features = ["with-libmdns"] }

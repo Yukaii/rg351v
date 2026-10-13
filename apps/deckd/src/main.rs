@@ -20,15 +20,18 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use librespot_connect::{
-    ConnectConfig, LoadContextOptions, LoadRequest, LoadRequestOptions, Spirc,
+    ConnectConfig, LoadContextOptions, LoadRequest, LoadRequestOptions, PlayingTrack, Spirc,
 };
 use librespot_core::authentication::Credentials;
 use librespot_core::cache::Cache;
 use librespot_core::config::DeviceType;
+use librespot_core::dealer::manager::BoxedStreamResult;
+use librespot_core::dealer::protocol::Message;
 use librespot_core::{Session, SessionConfig};
 use librespot_discovery::Discovery;
 use librespot_metadata::audio::UniqueFields;
 use librespot_playback::audio_backend;
+use librespot_protocol::connect::ClusterUpdate;
 use librespot_playback::config::{AudioFormat, Bitrate, PlayerConfig};
 use librespot_playback::mixer::{self, MixerConfig};
 use librespot_playback::player::{Player, PlayerEvent};
@@ -69,6 +72,8 @@ impl Play {
 struct State {
     play: Play,
     uri: String,
+    /// Playing context (playlist/album/...) from Connect cluster updates.
+    context: String,
     title: String,
     artist: String,
     album: String,
@@ -90,6 +95,7 @@ impl State {
         State {
             play: Play::Stopped,
             uri: String::new(),
+            context: String::new(),
             title: String::new(),
             artist: String::new(),
             album: String::new(),
@@ -128,6 +134,7 @@ impl State {
         kv("connected", if self.connected { "1" } else { "0" });
         kv("user", &self.user);
         kv("uri", &self.uri);
+        kv("context", &self.context);
         kv("title", &self.title);
         kv("artist", &self.artist);
         kv("album", &self.album);
@@ -431,6 +438,7 @@ fn bind_socket(path: &PathBuf) -> io::Result<UnixListener> {
 #[derive(Clone)]
 struct Restore {
     uri: String,
+    context: String,
     position_ms: u32,
     was_playing: bool,
     taken: Instant,
@@ -507,6 +515,10 @@ async fn main() {
     let mut restore: Option<Restore> = None;
     let mut restore_at: Option<Instant> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(500));
+    let last_path = opts.cache.join("deckd-last");
+    let mut last: Option<Last> = load_last(&last_path);
+    let mut last_saved = Instant::now();
+    let mut cluster_rx: Option<BoxedStreamResult<ClusterUpdate>> = None;
 
     loop {
         tokio::select! {
@@ -566,6 +578,10 @@ async fn main() {
                             }
                         }
                         let _ = events_tx.send("session".into());
+                        cluster_rx = session
+                            .dealer()
+                            .listen_for("hm://connect-state/v1/cluster", Message::from_raw::<ClusterUpdate>)
+                            .ok();
                         if restore.is_some() {
                             restore_at = Some(Instant::now() + RESTORE_DELAY);
                         }
@@ -598,6 +614,7 @@ async fn main() {
                     {
                         restore = Some(Restore {
                             uri: st.uri.clone(),
+                            context: st.context.clone(),
                             position_ms: st.position(),
                             was_playing: st.play == Play::Playing,
                             taken: Instant::now(),
@@ -619,11 +636,60 @@ async fn main() {
                 match ev {
                     Some(ev) => {
                         let line = apply_event(&mut state.lock().unwrap(), &ev);
+                        if matches!(
+                            ev,
+                            PlayerEvent::Paused { .. }
+                                | PlayerEvent::Stopped { .. }
+                                | PlayerEvent::Playing { .. }
+                                | PlayerEvent::TrackChanged { .. }
+                        ) {
+                            let st = state.lock().unwrap();
+                            if !st.uri.is_empty() {
+                                // A track that ended resumes from its start.
+                                let near_end = st.duration_ms > 0
+                                    && st.position().saturating_add(3000) >= st.duration_ms;
+                                let l = Last {
+                                    context: st.context.clone(),
+                                    track: st.uri.clone(),
+                                    position_ms: if near_end { 0 } else { st.position() },
+                                };
+                                if !matches!(ev, PlayerEvent::Playing { .. } | PlayerEvent::TrackChanged { .. }) {
+                                    save_last(&last_path, &l);
+                                }
+                                last = Some(l);
+                            }
+                        }
                         if let Some(l) = line {
                             let _ = events_tx.send(l);
                         }
                     }
                     None => fatal("player shut down unexpectedly"),
+                }
+            },
+            upd = async {
+                match cluster_rx.as_mut() {
+                    Some(c) => c.next().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match upd {
+                    Some(Ok(u)) => {
+                        if let Some(c) = u.cluster.as_ref() {
+                            // Only our own state tells us what we are playing.
+                            if c.active_device_id == session_config.device_id
+                                && !c.player_state.context_uri.is_empty()
+                            {
+                                let mut st = state.lock().unwrap();
+                                if st.context != c.player_state.context_uri {
+                                    st.context = c.player_state.context_uri.clone();
+                                    drop(st);
+                                    let _ = events_tx.send("context".into());
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(e)) => warn!("cluster update: {e}"),
+                    None => cluster_rx = None,
                 }
             },
             cmd = cmd_rx.recv() => {
@@ -634,7 +700,19 @@ async fn main() {
                             session.shutdown();
                         }
                     }
-                    (Some(cmd), Some(s)) => run_cmd(s, cmd),
+                    (Some(cmd), Some(s)) => {
+                        let idle = state.lock().unwrap().play == Play::Stopped;
+                        match (idle, matches!(cmd, Cmd::Play | Cmd::Toggle), last.clone()) {
+                            (true, true, Some(l)) => {
+                                // Nothing is loaded: pick up where playback
+                                // last stopped, from the device itself.
+                                info!("resuming {} at {} ms", l.track, l.position_ms);
+                                let _ = s.activate();
+                                let _ = s.load(resume_request(&l.context, &l.track, l.position_ms, true));
+                            }
+                            _ => run_cmd(s, cmd),
+                        }
+                    }
                     _ => {}
                 }
             },
@@ -667,17 +745,21 @@ async fn main() {
                                 let at = if play == Play::Playing { pos } else { r.position_ms };
                                 info!("restoring {} at {} ms (playing: {})", r.uri, at, playing);
                                 let _ = s.activate();
-                                let _ = s.load(LoadRequest::from_tracks(
-                                    vec![r.uri],
-                                    LoadRequestOptions {
-                                        start_playing: playing,
-                                        seek_to: at,
-                                        context_options: Some(LoadContextOptions::Autoplay),
-                                        ..Default::default()
-                                    },
-                                ));
+                                let _ = s.load(resume_request(&r.context, &r.uri, at, playing));
                             }
                         }
+                    }
+                }
+                // Persist the position every few seconds while playing.
+                if last_saved.elapsed() >= Duration::from_secs(10) {
+                    last_saved = Instant::now();
+                    let st = state.lock().unwrap();
+                    if st.play == Play::Playing && !st.uri.is_empty() {
+                        save_last(&last_path, &Last {
+                            context: st.context.clone(),
+                            track: st.uri.clone(),
+                            position_ms: st.position(),
+                        });
                     }
                 }
             },
@@ -694,6 +776,62 @@ async fn main() {
         }
     }
     let _ = fs::remove_file(&opts.sock);
+}
+
+/// Where playback was when it last stopped or changed track; survives
+/// restarts so a button press on the device can pick up where you left off.
+#[derive(Clone, Default)]
+struct Last {
+    context: String,
+    track: String,
+    position_ms: u32,
+}
+
+fn load_last(path: &PathBuf) -> Option<Last> {
+    let text = fs::read_to_string(path).ok()?;
+    let mut it = text.lines();
+    let context = it.next()?.to_string();
+    let track = it.next()?.to_string();
+    let position_ms = it.next()?.parse().ok()?;
+    if track.is_empty() {
+        return None;
+    }
+    Some(Last {
+        context,
+        track,
+        position_ms,
+    })
+}
+
+fn save_last(path: &PathBuf, last: &Last) {
+    let body = format!("{}\n{}\n{}\n", last.context, last.track, last.position_ms);
+    let _ = fs::write(path, body);
+}
+
+/// A load request that resumes `track` inside `context` when we know it, and
+/// otherwise just the track with autoplay.
+fn resume_request(context: &str, track: &str, position_ms: u32, play: bool) -> LoadRequest {
+    if context.starts_with("spotify:") && !context.is_empty() {
+        LoadRequest::from_context_uri(
+            context.to_string(),
+            LoadRequestOptions {
+                start_playing: play,
+                seek_to: position_ms,
+                playing_track: Some(PlayingTrack::Uri(track.to_string())),
+                ..Default::default()
+            },
+        )
+    } else {
+        LoadRequest::from_tracks(
+            vec![track.to_string()],
+            LoadRequestOptions {
+                start_playing: play,
+                seek_to: position_ms,
+                context_options: Some(LoadContextOptions::Autoplay),
+                ..Default::default()
+            },
+        )
+    }
 }
 
 fn run_cmd(s: &Spirc, cmd: Cmd) {

@@ -400,6 +400,7 @@ dependencies = [
  "librespot-discovery",
  "librespot-metadata",
  "librespot-playback",
+ "librespot-protocol",
  "log",
  "sha1",
  "tokio",
