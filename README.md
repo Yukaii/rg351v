@@ -135,6 +135,11 @@ Host rg351v
   `scripts/ports/sdl3-kmsdrm/`) – install KOReader under the Homebrew menu
   with a KMSDRM-enabled SDL3 swapped in; `scripts/device/gamelist-set.py`
   registers entries in an ES `gamelist.xml`
+- `apps/ptterm/` + `scripts/ports/ptterm/` – ptterm, a tiny SDL3 BBS terminal
+  (ssh to `bbsu@ptt.cc`; 80x24, Unifont bitmaps, gamepad). Generate its
+  assets with `apps/ptterm/tools/gen-assets.sh`, then
+  `scripts/build-port.sh ptterm && scripts/deploy-port.sh ptterm`. Parser
+  self-test: `apps/ptterm/tools/selftest.c` (replays captured BBS bytes).
 - `scripts/lib/device.sh` – shared host/ssh/hostname-assert helpers
 - `.storage/` – git-ignored, for anything secret or machine-specific
 - Sleep: the power key runs a real kernel suspend (`mem`, logind
@@ -173,3 +178,11 @@ Host rg351v
 - Prebuilt SDL3 apps (KOReader) bundle an SDL3 without KMSDRM; swap in
   `scripts/build-port.sh sdl3-kmsdrm` at the same release. glibc 2.36 and
   libstdc++ GLIBCXX 3.4.30 are the device's ceilings.
+- PTT (`ssh bbsu@ptt.cc`) streams UTF-8 text with raw Big5-UAO art in the same
+  connection, and `bbs@ptt.cc` is pure Big5. BBS layout counts every non-ASCII
+  character as 2 cells (even box/block glyphs that Unifont draws 8 px wide), so
+  generic terminal emulators misalign it; ptterm decodes UTF-8 first with
+  Big5-UAO fallback and fixes width at 2 cells.
+- Ghostty is not an option here: it needs GTK4 and OpenGL, and the device has
+  no X11/Wayland or desktop GL (Mali-G31, GLES only). Anything graphical must
+  draw through SDL/KMSDRM.
