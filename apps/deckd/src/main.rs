@@ -18,6 +18,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+
+use futures_util::future::join_all;
 use futures_util::StreamExt;
 use librespot_connect::{
     ConnectConfig, LoadContextOptions, LoadRequest, LoadRequestOptions, PlayingTrack, Spirc,
@@ -27,11 +30,14 @@ use librespot_core::cache::Cache;
 use librespot_core::config::DeviceType;
 use librespot_core::dealer::manager::BoxedStreamResult;
 use librespot_core::dealer::protocol::Message;
-use librespot_core::{Session, SessionConfig};
+use librespot_core::{Session, SessionConfig, SpotifyUri};
 use librespot_discovery::Discovery;
 use librespot_metadata::audio::UniqueFields;
+use librespot_metadata::{Metadata, Playlist, Track};
 use librespot_playback::audio_backend;
 use librespot_protocol::connect::ClusterUpdate;
+use librespot_protocol::playlist4_external::SelectedListContent;
+use protobuf::Message as _;
 use librespot_playback::config::{AudioFormat, Bitrate, PlayerConfig};
 use librespot_playback::mixer::{self, MixerConfig};
 use librespot_playback::player::{Player, PlayerEvent};
@@ -167,6 +173,8 @@ enum Cmd {
     Shuffle(bool),
     Repeat(bool),
     Load(String),
+    /// Play `track`, inside `context` when given.
+    PlayTrack { context: Option<String>, track: String },
     /// Drop the Spotify session on purpose (exercises the restore path).
     Reconnect,
 }
@@ -237,6 +245,141 @@ fn set_flags(playing: bool) {
 }
 
 type Shared = Arc<Mutex<State>>;
+/// The live Spotify session, for request handlers that talk to the Web API.
+type SessShared = Arc<Mutex<Option<Session>>>;
+
+const WEB_SCOPES: &str = "playlist-read-private,playlist-read-collaborative,user-library-read,user-read-private,user-top-read";
+
+const PAGE: usize = 24;
+
+fn session_of(sess: &SessShared) -> Result<Session, String> {
+    sess.lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "no session".to_string())
+}
+
+/// `item\tkind\turi\ttitle\tsubtitle` lines for a slice of track URIs.
+async fn track_items(session: &Session, uris: &[String]) -> String {
+    let rows = join_all(uris.iter().map(|u| async move {
+        let named = async {
+            let id = SpotifyUri::from_uri(u).ok()?;
+            let t = Track::get(session, &id).await.ok()?;
+            let artists = t
+                .artists
+                .iter()
+                .map(|a| a.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some((t.name, artists))
+        }
+        .await;
+        let (name, artist) = named.unwrap_or_else(|| (u.clone(), String::new()));
+        format!("item\ttrack\t{u}\t{}\t{}\n", clean(&name), clean(&artist))
+    }))
+    .await;
+    rows.concat()
+}
+
+async fn list_playlists(session: &Session) -> Result<String, String> {
+    let bytes = session
+        .spclient()
+        .get_rootlist(0, Some(200))
+        .await
+        .map_err(|e| format!("rootlist: {e}"))?;
+    let list = SelectedListContent::parse_from_bytes(&bytes).map_err(|e| format!("parse: {e}"))?;
+    let contents = &list.contents;
+    let mut out = String::new();
+    let mut n = 0;
+    for (i, item) in contents.items.iter().enumerate() {
+        let item_uri = item.uri().to_string();
+        if !item_uri.starts_with("spotify:playlist:") {
+            continue; // folders and group markers
+        }
+        let meta = contents.meta_items.get(i);
+        let name = meta
+            .map(|m| m.attributes.name().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| item_uri.clone());
+        let len = meta.map(|m| m.length()).unwrap_or(0);
+        out.push_str(&format!(
+            "item\tplaylist\t{}\t{}\t{} tracks\n",
+            item_uri,
+            clean(&name),
+            len
+        ));
+        n += 1;
+    }
+    Ok(format!("page\t0\t{n}\n{out}"))
+}
+
+/// Track URIs of a context: a playlist URI, `liked`, or `search:<query>`.
+async fn context_tracks(session: &Session, ctx: &str) -> Result<(String, Vec<String>), String> {
+    if ctx.starts_with("spotify:playlist:") {
+        let id = SpotifyUri::from_uri(ctx).map_err(|e| format!("uri: {e}"))?;
+        let pl = Playlist::get(session, &id)
+            .await
+            .map_err(|e| format!("playlist: {e}"))?;
+        let uris = pl.tracks().filter_map(|t| t.to_uri().ok()).collect();
+        return Ok((ctx.to_string(), uris));
+    }
+    let uri = if ctx == "liked" {
+        format!("spotify:user:{}:collection", session.username())
+    } else if let Some(q) = ctx.strip_prefix("search:") {
+        format!("spotify:search:{}", q.replace(' ', "+"))
+    } else {
+        return Err("unknown context".into());
+    };
+    let c = session
+        .spclient()
+        .get_context(&uri)
+        .await
+        .map_err(|e| format!("context: {e}"))?;
+    let uris = c
+        .pages
+        .iter()
+        .flat_map(|p| p.tracks.iter())
+        .map(|t| t.uri().to_string())
+        .filter(|u| u.starts_with("spotify:track:"))
+        .collect();
+    // Search results are not a playable context of their own.
+    let play_ctx = if ctx.starts_with("search:") { "-".to_string() } else { uri };
+    Ok((play_ctx, uris))
+}
+
+async fn list_tracks(session: &Session, ctx: &str, offset: usize) -> Result<String, String> {
+    let (play_ctx, uris) = context_tracks(session, ctx).await?;
+    let total = uris.len();
+    let slice: Vec<String> = uris.into_iter().skip(offset).take(PAGE).collect();
+    let items = track_items(session, &slice).await;
+    Ok(format!("page\t{offset}\t{total}\ncontext\t{play_ctx}\n{items}"))
+}
+
+/// GET https://api.spotify.com/v1/<path> with the session's own token.
+async fn web_get(sess: &SessShared, path: &str) -> Result<String, String> {
+    let session = sess
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "no session".to_string())?;
+    let token = session
+        .token_provider()
+        .get_token(WEB_SCOPES)
+        .await
+        .map_err(|e| format!("token: {e}"))?;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri(format!("https://api.spotify.com/v1/{path}"))
+        .header("Authorization", format!("Bearer {}", token.access_token))
+        .body(Bytes::new())
+        .map_err(|e| format!("request: {e}"))?;
+    let body = session
+        .http_client()
+        .request_body(req)
+        .await
+        .map_err(|e| format!("http: {e}"))?;
+    String::from_utf8(body.to_vec()).map_err(|e| format!("utf8: {e}"))
+}
 
 /// Fold a player event into the shared state; returns an event line to
 /// broadcast when something a UI cares about changed.
@@ -351,7 +494,7 @@ fn parse_cmd(line: &str) -> Result<Cmd, String> {
         }
     };
     Ok(match word {
-        "play" => Cmd::Play,
+        "play" if arg.is_none() => Cmd::Play,
         "pause" => Cmd::Pause,
         "toggle" => Cmd::Toggle,
         "next" => Cmd::Next,
@@ -362,6 +505,13 @@ fn parse_cmd(line: &str) -> Result<Cmd, String> {
         "repeat" => Cmd::Repeat(onoff(arg)?),
         "load" => Cmd::Load(arg.ok_or("missing uri")?.to_string()),
         "reconnect" => Cmd::Reconnect,
+        "play" if arg.is_some() => {
+            let track = it.next().ok_or("usage: play <context|-> <track uri>")?;
+            Cmd::PlayTrack {
+                context: arg.filter(|c| *c != "-").map(|c| c.to_string()),
+                track: track.to_string(),
+            }
+        }
         other => return Err(format!("unknown command: {other}")),
     })
 }
@@ -371,6 +521,7 @@ async fn serve_client(
     state: Shared,
     cmds: mpsc::UnboundedSender<Cmd>,
     events: broadcast::Sender<String>,
+    sess: SessShared,
 ) {
     let (rd, mut wr) = stream.into_split();
     let mut lines = BufReader::new(rd).lines();
@@ -394,6 +545,47 @@ async fn serve_client(
                         "OK\n".to_string()
                     }
                     "quit" => return,
+                    "playlists" => match session_of(&sess) {
+                        Ok(se) => match list_playlists(&se).await {
+                            Ok(b) => format!("{b}.\n"),
+                            Err(e) => format!("ERR {}\n", clean(&e)),
+                        },
+                        Err(e) => format!("ERR {e}\n"),
+                    },
+                    q if q.starts_with("tracks ") => {
+                        let mut it = q[7..].split_whitespace();
+                        let ctx = it.next().unwrap_or("").to_string();
+                        let off = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        match session_of(&sess) {
+                            Ok(se) => match list_tracks(&se, &ctx, off).await {
+                                Ok(b) => format!("{b}.\n"),
+                                Err(e) => format!("ERR {}\n", clean(&e)),
+                            },
+                            Err(e) => format!("ERR {e}\n"),
+                        }
+                    }
+                    q if q.starts_with("search ") => {
+                        // search <offset> <query...>
+                        let rest = q[7..].trim();
+                        let (off, query) = match rest.split_once(' ') {
+                            Some((o, t)) if o.parse::<usize>().is_ok() => (o.parse().unwrap_or(0), t.trim()),
+                            _ => (0, rest),
+                        };
+                        match session_of(&sess) {
+                            Ok(se) => match list_tracks(&se, &format!("search:{query}"), off).await {
+                                Ok(b) => format!("{b}.\n"),
+                                Err(e) => format!("ERR {}\n", clean(&e)),
+                            },
+                            Err(e) => format!("ERR {e}\n"),
+                        }
+                    }
+                    web if web.starts_with("web ") => {
+                        // Debug probe: raw Web API JSON on one line.
+                        match web_get(&sess, web[4..].trim()).await {
+                            Ok(body) => format!("{}\n.\n", clean(&body)),
+                            Err(e) => format!("ERR {e}\n"),
+                        }
+                    }
                     other => match parse_cmd(other) {
                         Ok(c) => {
                             let _ = cmds.send(c);
@@ -467,6 +659,7 @@ async fn main() {
     state.lock().unwrap().volume = initial_volume;
     let (events_tx, _) = broadcast::channel::<String>(64);
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Cmd>();
+    let sess_shared: SessShared = Arc::new(Mutex::new(None));
 
     let listener = bind_socket(&opts.sock)
         .unwrap_or_else(|e| fatal(&format!("socket {}: {e}", opts.sock.display())));
@@ -578,6 +771,7 @@ async fn main() {
                             }
                         }
                         let _ = events_tx.send("session".into());
+                        *sess_shared.lock().unwrap() = Some(session.clone());
                         cluster_rx = session
                             .dealer()
                             .listen_for("hm://connect-state/v1/cluster", Message::from_raw::<ClusterUpdate>)
@@ -606,6 +800,7 @@ async fn main() {
                 spirc = None;
                 warn!("Connect session ended unexpectedly");
                 state.lock().unwrap().connected = false;
+                *sess_shared.lock().unwrap() = None;
                 let _ = events_tx.send("session".into());
                 {
                     let st = state.lock().unwrap();
@@ -723,6 +918,7 @@ async fn main() {
                         state.clone(),
                         cmd_tx.clone(),
                         events_tx.clone(),
+                        sess_shared.clone(),
                     ));
                 }
             },
@@ -846,6 +1042,24 @@ fn run_cmd(s: &Spirc, cmd: Cmd) {
         Cmd::Shuffle(b) => s.shuffle(b),
         Cmd::Repeat(b) => s.repeat(b),
         Cmd::Reconnect => Ok(()),
+        Cmd::PlayTrack { context, track } => {
+            let opts = LoadRequestOptions {
+                start_playing: true,
+                playing_track: Some(PlayingTrack::Uri(track.clone())),
+                ..Default::default()
+            };
+            match context {
+                Some(c) => s.load(LoadRequest::from_context_uri(c, opts)),
+                None => s.load(LoadRequest::from_tracks(
+                    vec![track],
+                    LoadRequestOptions {
+                        start_playing: true,
+                        context_options: Some(LoadContextOptions::Autoplay),
+                        ..Default::default()
+                    },
+                )),
+            }
+        }
         Cmd::Load(uri) => {
             let opts = LoadRequestOptions {
                 start_playing: true,

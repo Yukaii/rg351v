@@ -252,6 +252,137 @@ static uint32_t mix(uint32_t h) {
   return h;
 }
 
+
+/* ---- browsing -------------------------------------------------------- */
+static void send_cmd(const char *line);
+
+typedef struct {
+  char kind; /* 'p' playlist, 't' track */
+  char uri[96];
+  char title[160];
+  char sub[96];
+} Item;
+
+#define MAX_ITEMS 3200
+static Item items[MAX_ITEMS];
+static int n_items, total_items;
+static char list_ctx[160]; /* "playlists", "liked", a playlist URI or "search:<q>" */
+static char play_ctx[160]; /* context URI to play tracks inside ("-" = none) */
+static char list_title[96];
+static int list_busy, list_err;
+static char err_msg[96];
+static int sel, top, pending_sel = -1, pending_top;
+static uint64_t sel_at;
+
+typedef enum { V_NOW, V_MENU, V_LIST, V_OSK } View;
+static View view = V_NOW;
+static int menu_sel;
+
+typedef struct {
+  char ctx[160], title[96];
+  int sel, top;
+} Frame;
+static Frame stack[4];
+static int depth;
+
+static char search_q[64];
+static int osk_r, osk_c;
+static const char *const OSK_ROWS[4] = {"1234567890", "qwertyuiop", "asdfghjkl-", "zxcvbnm,.'"};
+static const char *const OSK_SPECIAL[4] = {"SPACE", "DEL", "SEARCH", "CANCEL"};
+
+static void list_request(int more) {
+  char cmd[256];
+  if (list_busy) return;
+  int off = more ? n_items : 0;
+  if (!strcmp(list_ctx, "playlists"))
+    snprintf(cmd, sizeof cmd, "playlists");
+  else if (!strncmp(list_ctx, "search:", 7))
+    snprintf(cmd, sizeof cmd, "search %d %s", off, list_ctx + 7);
+  else
+    snprintf(cmd, sizeof cmd, "tracks %s %d", list_ctx, off);
+  list_busy = 1;
+  list_err = 0;
+  send_cmd(cmd);
+}
+
+static void open_list(const char *ctx, const char *title) {
+  snprintf(list_ctx, sizeof list_ctx, "%s", ctx);
+  snprintf(list_title, sizeof list_title, "%s", title);
+  n_items = total_items = 0;
+  sel = top = 0;
+  play_ctx[0] = 0;
+  list_busy = 0; /* a stale reply is dropped by its own page line */
+  view = V_LIST;
+  list_request(0);
+}
+
+static void push_list(const char *ctx, const char *title) {
+  if (depth < 4) {
+    snprintf(stack[depth].ctx, sizeof stack[depth].ctx, "%s", list_ctx);
+    snprintf(stack[depth].title, sizeof stack[depth].title, "%s", list_title);
+    stack[depth].sel = sel;
+    stack[depth].top = top;
+    depth++;
+  }
+  open_list(ctx, title);
+}
+
+static void pop_list(void) {
+  if (depth == 0) {
+    view = V_MENU;
+    return;
+  }
+  depth--;
+  open_list(stack[depth].ctx, stack[depth].title);
+  pending_sel = stack[depth].sel;
+  pending_top = stack[depth].top;
+}
+
+static void osk_move(int dr, int dc) {
+  osk_r += dr;
+  if (osk_r < 0) osk_r = 4;
+  if (osk_r > 4) osk_r = 0;
+  int len = osk_r < 4 ? 10 : 4;
+  osk_c += dc;
+  if (osk_c < 0) osk_c = len - 1;
+  if (osk_c >= len) osk_c = osk_r < 4 && dc == 0 ? len - 1 : 0;
+  if (osk_c >= len) osk_c = len - 1;
+}
+
+static void osk_submit(void) {
+  char ctx[160], title[96];
+  if (!search_q[0]) return;
+  snprintf(ctx, sizeof ctx, "search:%s", search_q);
+  snprintf(title, sizeof title, "SEARCH: %s", search_q);
+  depth = 0;
+  open_list(ctx, title);
+}
+
+/* A on the OSK; returns nothing, mutates search_q / view. */
+static void osk_press(void) {
+  size_t n = strlen(search_q);
+  if (osk_r < 4) {
+    if (n + 1 < sizeof search_q) {
+      search_q[n] = OSK_ROWS[osk_r][osk_c];
+      search_q[n + 1] = 0;
+    }
+    return;
+  }
+  switch (osk_c) {
+  case 0:
+    if (n + 1 < sizeof search_q && n > 0) {
+      search_q[n] = ' ';
+      search_q[n + 1] = 0;
+    }
+    break;
+  case 1:
+    if (n) search_q[n - 1] = 0;
+    break;
+  case 2: osk_submit(); break;
+  default: view = V_MENU; break;
+  }
+}
+
 /* Procedural "cover": a mirrored 24x24 pattern seeded by the track URI,
  * four phosphor levels. Real album art can replace it later. */
 static void draw_art(int x, int y, const char *seed) {
@@ -348,19 +479,136 @@ static void draw_header(uint64_t t_ms) {
   fill(0, 22, SCR_W, 2, T->dim);
 }
 
+
+static void draw_scrollbar(int x, int y, int h, int n, int top_i, int rows) {
+  fill(x, y, 4, h, 0xFF14110A);
+  if (n <= rows) return;
+  int th = h * rows / n;
+  if (th < 8) th = 8;
+  int ty = y + (h - th) * top_i / (n - rows);
+  fill(x, ty, 4, th, T->mid);
+}
+
+static void draw_menu(uint64_t t_ms) {
+  draw_header(t_ms);
+  static const char *const ENT[4] = {"LIKED SONGS", "PLAYLISTS", "SEARCH", "NOW PLAYING"};
+  static const char *const DESC[4] = {"your saved tracks", "your library lists",
+                                      "find tracks by name", "back to the player"};
+  text(24, 40, "LIBRARY", T->accent, 1);
+  for (int i = 0; i < 4; i++) {
+    int y = 80 + i * 72;
+    if (i == menu_sel) {
+      fill(16, y - 10, SCR_W - 32, 60, 0xFF14110A);
+      brackets(16, y - 10, SCR_W - 32, 60, 12, T->hi);
+    }
+    text(40, y, ENT[i], i == menu_sel ? T->hi : T->mid, 2);
+    text(40, y + 34, DESC[i], T->dim, 1);
+    if (i == menu_sel) text_right(SCR_W - 40, y + 8, ">", T->hi, 2);
+  }
+}
+
+#define LIST_ROWS 18
+#define LIST_RH 20
+#define LIST_Y 72
+
+static void draw_list(uint64_t t_ms) {
+  draw_header(t_ms);
+  if (sel >= n_items) sel = n_items ? n_items - 1 : 0;
+  if (sel < top) top = sel;
+  if (sel >= top + LIST_ROWS) top = sel - LIST_ROWS + 1;
+  if (top < 0) top = 0;
+  text_clip(16, 32, list_title, T->hi, 2, 16, 470);
+  char cnt[32];
+  snprintf(cnt, sizeof cnt, "%d / %d", n_items ? sel + 1 : 0, total_items ? total_items : n_items);
+  text_right(SCR_W - 16, 40, cnt, T->mid, 1);
+  fill(0, 66, SCR_W, 2, T->dim);
+  uint64_t since_sel = t_ms > sel_at ? t_ms - sel_at : 0;
+  for (int i = 0; i < LIST_ROWS; i++) {
+    int idx = top + i;
+    if (idx >= n_items) break;
+    int y = LIST_Y + i * LIST_RH;
+    int cur = idx == sel;
+    if (cur) fill(12, y - 2, SCR_W - 32, LIST_RH, T->dim);
+    const Item *it = &items[idx];
+    text(18, y, it->kind == 'p' ? "=" : ">", cur ? T->hi : T->dim, 1);
+    int tw = it->sub[0] ? 380 : 580;
+    if (cur)
+      marquee(34, y, tw, it->title, T->hi, 1, since_sel);
+    else
+      text_clip(34, y, it->title, T->mid, 1, 34, 34 + tw);
+    if (it->sub[0]) text_clip(424, y, it->sub, cur ? T->mid : T->dim, 1, 424, 618);
+  }
+  if (n_items == 0) {
+    if (list_err) {
+      text(24, 120, "COULD NOT LOAD", T->warn, 2);
+      text(24, 160, err_msg, T->mid, 1);
+    } else if (list_busy) {
+      text(24, 120, "LOADING...", T->accent, 2);
+    } else {
+      text(24, 120, "EMPTY", T->dim, 2);
+    }
+  } else if (list_busy) {
+    text_right(SCR_W - 16, 52, "loading...", T->accent, 1);
+  }
+  draw_scrollbar(SCR_W - 14, LIST_Y - 2, LIST_ROWS * LIST_RH, n_items, top, LIST_ROWS);
+}
+
+static void draw_osk(uint64_t t_ms) {
+  draw_header(t_ms);
+  text(24, 40, "SEARCH", T->accent, 1);
+  char q[80];
+  snprintf(q, sizeof q, "%s%s", search_q, (t_ms / 400) & 1 ? "_" : " ");
+  fill(16, 70, SCR_W - 32, 44, 0xFF14110A);
+  fill(16, 70, SCR_W - 32, 2, T->dim);
+  fill(16, 112, SCR_W - 32, 2, T->dim);
+  text_clip(26, 78, q, T->hi, 2, 26, SCR_W - 26);
+  const int kw = 56, kh = 38, gap = 4, x0 = 24, y0 = 140;
+  for (int r = 0; r < 4; r++)
+    for (int c = 0; c < 10; c++) {
+      int x = x0 + c * (kw + gap), y = y0 + r * (kh + gap);
+      int cur = r == osk_r && c == osk_c;
+      fill(x, y, kw, kh, cur ? T->mid : 0xFF14110A);
+      char ch[2] = {OSK_ROWS[r][c], 0};
+      text(x + (kw - 16) / 2, y + (kh - 32) / 2, ch, cur ? T->bg : T->hi, 2);
+    }
+  const int sw = 144;
+  for (int c = 0; c < 4; c++) {
+    int x = x0 + c * (sw + gap), y = y0 + 4 * (kh + gap);
+    int cur = osk_r == 4 && c == osk_c;
+    fill(x, y, sw, kh, cur ? T->mid : 0xFF14110A);
+    int w = text_px(OSK_SPECIAL[c], 1);
+    text(x + (sw - w) / 2, y + (kh - 16) / 2, OSK_SPECIAL[c], cur ? T->bg : T->hi, 1);
+  }
+}
+
 static void draw_hint(void) {
   fill(0, SCR_H - 24, SCR_W, 24, 0xFF14110A);
   fill(0, SCR_H - 24, SCR_W, 2, T->dim);
-  const char *h = !M.online || !M.connected
-                      ? "SELECT+START:Leave"
+  const char *h = view == V_MENU   ? "UP/DN:Choose A:Open B:Back START:Now playing SEL+START:Leave"
+                  : view == V_LIST ? "A:Open/Play X:Play all L1/R1:Page B:Back START:Now playing"
+                  : view == V_OSK  ? "Arrows:Move A:Type B:Delete X:Space START:Search Y:Cancel"
+                  : !M.online || !M.connected
+                      ? "START:Library  SELECT+START:Leave"
                       : (strcmp(model_state(), "stopped") == 0
-                             ? "A:Resume last  ^/v:Vol  SELECT+START:Leave"
-                             : "A:Play/Pause L1/R1:Prev/Next </>:Seek ^/v:Vol X:Shuf Y:Rep SEL+START:Leave");
+                             ? "A:Resume last  START:Library  ^/v:Vol  SEL+START:Leave"
+                             : "A:Play/Pause L1/R1:Prev/Next </>:Seek ^/v:Vol X:Shuf Y:Rep START:Library");
   text(8, SCR_H - 20, h, T->mid, 1);
 }
 
 /* t_ms is absolute mono_ms(): the same clock as Model.pos_at and title_at. */
+static void draw_now(uint64_t t_ms);
+
 static void draw_screen(uint64_t t_ms) {
+  switch (view) {
+  case V_MENU: draw_menu(t_ms); break;
+  case V_LIST: draw_list(t_ms); break;
+  case V_OSK: draw_osk(t_ms); break;
+  default: draw_now(t_ms); break;
+  }
+  draw_hint();
+}
+
+static void draw_now(uint64_t t_ms) {
   uint64_t since_title = t_ms > M.title_at ? t_ms - M.title_at : 0;
   draw_header(t_ms);
   const int ax = 24, ay = 40;
@@ -409,7 +657,6 @@ static void draw_screen(uint64_t t_ms) {
   }
   draw_spectrum(16, 268, SCR_W - 32, 168, t_ms, fnv(M.uri), is_playing());
   fill(0, 448, SCR_W, 2, T->dim);
-  draw_hint();
 }
 
 /* ---- deckd socket ---------------------------------------------------- */
@@ -418,6 +665,7 @@ static char inbuf[16384];
 static size_t inlen;
 static Model pending;
 static int in_status;
+static int in_list;
 static int want_status = 1;
 
 static void conn_close(void) {
@@ -453,8 +701,9 @@ static int conn_open(const char *path) {
 static void send_cmd(const char *line) {
   fprintf(stderr, "deck: send '%s' (%s)\n", line, sfd < 0 ? "no socket" : "ok");
   if (sfd < 0) return;
-  char buf[96];
+  char buf[320];
   int n = snprintf(buf, sizeof buf, "%s\n", line);
+  if (n >= (int)sizeof buf) n = (int)sizeof buf - 1;
   if (write(sfd, buf, (size_t)n) < 0 && errno != EAGAIN) conn_close();
 }
 
@@ -476,13 +725,57 @@ static int conn_read(uint64_t now_ms) {
     *nl = 0;
     if (!strncmp(line, "event ", 6)) {
       want_status = 1;
-    } else if (!strcmp(line, ".")) {
-      pending.online = 1;
-      M = pending;
-      in_status = 0;
+    } else if (!strncmp(line, "page\t", 5)) {
+      int off = atoi(line + 5);
+      char *t = strchr(line + 5, '\t');
+      in_list = 1;
+      if (off == 0) n_items = 0;
+      if (t) total_items = atoi(t + 1);
+    } else if (!strncmp(line, "context\t", 8)) {
+      snprintf(play_ctx, sizeof play_ctx, "%s", line + 8);
+      in_list = 1;
+    } else if (!strncmp(line, "item\t", 5)) {
+      char *f[4] = {0};
+      char *c = line + 5;
+      for (int i = 0; i < 4 && c; i++) {
+        f[i] = c;
+        c = strchr(c, '\t');
+        if (c) *c++ = 0;
+      }
+      if (n_items < MAX_ITEMS && f[0] && f[1] && f[2]) {
+        Item *it = &items[n_items++];
+        it->kind = f[0][0] == 'p' ? 'p' : 't';
+        snprintf(it->uri, sizeof it->uri, "%s", f[1]);
+        snprintf(it->title, sizeof it->title, "%s", f[2]);
+        snprintf(it->sub, sizeof it->sub, "%s", f[3] ? f[3] : "");
+      }
+      in_list = 1;
       changed = 1;
-    } else if (!strncmp(line, "OK", 2) || !strncmp(line, "ERR", 3)) {
-      /* command acknowledgements */
+    } else if (!strcmp(line, ".")) {
+      if (in_list) {
+        in_list = 0;
+        list_busy = 0;
+        if (pending_sel >= 0) {
+          sel = pending_sel < n_items ? pending_sel : (n_items ? n_items - 1 : 0);
+          top = pending_top;
+          pending_sel = -1;
+        }
+      } else {
+        pending.online = 1;
+        M = pending;
+        in_status = 0;
+      }
+      changed = 1;
+    } else if (!strncmp(line, "ERR", 3)) {
+      if (list_busy) {
+        list_busy = 0;
+        list_err = 1;
+        in_list = 0;
+        snprintf(err_msg, sizeof err_msg, "%s", line[3] ? line + 4 : "error");
+        changed = 1;
+      }
+    } else if (!strncmp(line, "OK", 2)) {
+      /* command acknowledgement */
     } else {
       char *eq = strchr(line, '=');
       if (eq) {
@@ -566,6 +859,105 @@ static void demo_model(void) {
   wifi_bars = 3;
 }
 
+
+#ifndef DECK_NO_SDL
+/* One logical button press (a button or a trigger edge, or a key repeat).
+ * Button numbers are SDL_GamepadButton values; triggers use shoulder+100. */
+static void handle_press(int b, uint64_t now) {
+  char cmd[320];
+  int vol_pct = (int)((M.volume * 100 + 32767) / 65535);
+  const int L1 = SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, R1 = SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER;
+  const int UP = SDL_GAMEPAD_BUTTON_DPAD_UP, DN = SDL_GAMEPAD_BUTTON_DPAD_DOWN;
+  const int LT = SDL_GAMEPAD_BUTTON_DPAD_LEFT, RT = SDL_GAMEPAD_BUTTON_DPAD_RIGHT;
+  const int A = SDL_GAMEPAD_BUTTON_SOUTH, B = SDL_GAMEPAD_BUTTON_EAST;
+  const int X = SDL_GAMEPAD_BUTTON_WEST, Y = SDL_GAMEPAD_BUTTON_NORTH;
+  const int START = SDL_GAMEPAD_BUTTON_START;
+
+  if (view == V_MENU) {
+    if (b == UP) menu_sel = (menu_sel + 3) % 4;
+    else if (b == DN) menu_sel = (menu_sel + 1) % 4;
+    else if (b == B || b == START) view = V_NOW;
+    else if (b == A) {
+      depth = 0;
+      if (menu_sel == 0) open_list("liked", "LIKED SONGS");
+      else if (menu_sel == 1) open_list("playlists", "PLAYLISTS");
+      else if (menu_sel == 2) { search_q[0] = 0; osk_r = osk_c = 0; view = V_OSK; }
+      else view = V_NOW;
+    }
+    return;
+  }
+  if (view == V_OSK) {
+    if (b == UP) osk_move(-1, 0);
+    else if (b == DN) osk_move(1, 0);
+    else if (b == LT) osk_move(0, -1);
+    else if (b == RT) osk_move(0, 1);
+    else if (b == A) osk_press();
+    else if (b == B) { size_t n = strlen(search_q); if (n) search_q[n - 1] = 0; }
+    else if (b == X) osk_r = 4, osk_c = 0, osk_press(), osk_r = 0, osk_c = 0;
+    else if (b == START) osk_submit();
+    else if (b == Y) view = V_MENU;
+    return;
+  }
+  if (view == V_LIST) {
+    int page = LIST_ROWS - 1;
+    if (b == UP && sel > 0) sel--;
+    else if (b == DN && sel + 1 < n_items) sel++;
+    else if (b == L1 || b == LT) sel = sel - page < 0 ? 0 : sel - page;
+    else if (b == R1 || b == RT) sel = sel + page >= n_items ? (n_items ? n_items - 1 : 0) : sel + page;
+    else if (b == B) pop_list();
+    else if (b == START) view = V_NOW;
+    else if (b == A && sel < n_items) {
+      const Item *it = &items[sel];
+      if (it->kind == 'p') {
+        push_list(it->uri, it->title);
+      } else {
+        snprintf(cmd, sizeof cmd, "play %s %s", play_ctx[0] ? play_ctx : "-", it->uri);
+        send_cmd(cmd);
+        view = V_NOW;
+      }
+    } else if (b == X) {
+      const char *c = NULL;
+      if (n_items && sel < n_items && items[sel].kind == 'p') c = items[sel].uri;
+      else if (play_ctx[0] && strcmp(play_ctx, "-") != 0) c = play_ctx;
+      if (c) {
+        snprintf(cmd, sizeof cmd, "load %s", c);
+        send_cmd(cmd);
+        view = V_NOW;
+      }
+    }
+    sel_at = now;
+    /* fetch the next page before the cursor reaches the end */
+    if (n_items && n_items < total_items && n_items - sel < 8) list_request(1);
+    return;
+  }
+
+  /* now playing */
+  if (b == A) send_cmd("toggle");
+  else if (b == L1) send_cmd("prev");
+  else if (b == R1) send_cmd("next");
+  else if (b == START) { view = V_MENU; menu_sel = 0; }
+  else if (b == LT || b == RT) {
+    int64_t p = (int64_t)position_now(now) + (b == RT ? 10000 : -10000);
+    if (p < 0) p = 0;
+    snprintf(cmd, sizeof cmd, "seek %lld", (long long)p);
+    send_cmd(cmd);
+  } else if (b == UP || b == DN || b == L1 + 100 || b == R1 + 100) {
+    int up = b == UP || b == R1 + 100;
+    int v = vol_pct + (up ? 5 : -5);
+    v = v < 0 ? 0 : v > 100 ? 100 : v;
+    snprintf(cmd, sizeof cmd, "volume %d", v);
+    send_cmd(cmd);
+    M.volume = (uint32_t)(v * 65535 / 100); /* show it before the event */
+  } else if (b == X) {
+    snprintf(cmd, sizeof cmd, "shuffle %s", M.shuffle ? "off" : "on");
+    send_cmd(cmd);
+  } else if (b == Y) {
+    snprintf(cmd, sizeof cmd, "repeat %s", M.repeat ? "off" : "on");
+    send_cmd(cmd);
+  }
+}
+#endif
+
 #ifdef DECK_NO_SDL
 int main(void) {
   const char *dir = getenv("DECK_ASSETS");
@@ -586,6 +978,25 @@ int main(void) {
   const uint64_t extra = getenv("DECK_T") ? (uint64_t)atoi(getenv("DECK_T")) : 0;
   M.pos_at = base;
   M.title_at = base;
+  const char *vw = getenv("DECK_VIEW");
+  if (vw) {
+    static const char *const names[] = {"Anomalie bleue", "Hématome", "New notes",
+                                        "\xe6\x9c\x88\xe3\x81\xae\xe5\x85\x89 - Moonlight Sonata (Extended Live Version) [Remastered 2011]",
+                                        "STORM I", "Last Train to London", "Veridis Quo"};
+    for (int i = 0; i < 30; i++) {
+      Item *it = &items[n_items++];
+      it->kind = !strcmp(vw, "playlists") ? 'p' : 't';
+      snprintf(it->uri, sizeof it->uri, "spotify:track:%d", i);
+      snprintf(it->title, sizeof it->title, "%s", names[i % 7]);
+      snprintf(it->sub, sizeof it->sub, it->kind == 'p' ? "%d tracks" : "Artist %d", 10 + i);
+    }
+    total_items = 2928;
+    sel = 4;
+    snprintf(list_title, sizeof list_title, "%s", !strcmp(vw, "playlists") ? "PLAYLISTS" : "LIKED SONGS");
+    if (!strcmp(vw, "menu")) { view = V_MENU; menu_sel = 1; }
+    else if (!strcmp(vw, "osk")) { view = V_OSK; snprintf(search_q, sizeof search_q, "daft pun"); osk_r = 1; osk_c = 3; }
+    else view = V_LIST;
+  }
   draw_screen(base + 1500 + extra);
   const char *out = getenv("DECK_DUMP");
   FILE *f = fopen(out ? out : "deck.ppm", "wb");
@@ -646,6 +1057,8 @@ int main(int argc, char **argv) {
   if (demo) demo_model();
   uint64_t last_conn_try = 0, last_status = 0, last_sys = 0, last_draw = 0, last_input = mono_ms();
   int select_held = 0, start_held = 0, trig_l = 0, trig_r = 0, blanked = 0, dirty = 1;
+  int rep_btn = -1;
+  uint64_t rep_next = 0;
 
   while (!quit_flag) {
     uint64_t now = mono_ms();
@@ -693,28 +1106,35 @@ int main(int argc, char **argv) {
       if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
         b = (SDL_GamepadButton)e.gbutton.button;
         pressed = 1;
+        if (b == SDL_GAMEPAD_BUTTON_DPAD_UP || b == SDL_GAMEPAD_BUTTON_DPAD_DOWN ||
+            b == SDL_GAMEPAD_BUTTON_DPAD_LEFT || b == SDL_GAMEPAD_BUTTON_DPAD_RIGHT) {
+          rep_btn = b;
+          rep_next = now + 350;
+        }
       } else if (e.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
         b = (SDL_GamepadButton)e.gbutton.button;
         if (b == SDL_GAMEPAD_BUTTON_BACK) select_held = 0;
         if (b == SDL_GAMEPAD_BUTTON_START) start_held = 0;
+        if ((int)b == rep_btn) rep_btn = -1;
       } else if (e.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) {
         int hit = e.gaxis.value > 16000;
         if (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER) {
-          if (hit && !trig_l) { pressed = 1; b = SDL_GAMEPAD_BUTTON_LEFT_SHOULDER + 100; }
+          if (hit && !trig_l) { pressed = 1; b = (SDL_GamepadButton)(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER + 100); }
           trig_l = hit;
         } else if (e.gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) {
-          if (hit && !trig_r) { pressed = 1; b = SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER + 100; }
+          if (hit && !trig_r) { pressed = 1; b = (SDL_GamepadButton)(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER + 100); }
           trig_r = hit;
         }
       }
       if (!pressed) continue;
-      fprintf(stderr, "deck: press %d (blanked=%d online=%d state=%s)\n", (int)b, blanked, M.online,
-              model_state());
+      fprintf(stderr, "deck: press %d view=%d (blanked=%d online=%d state=%s)\n", (int)b, (int)view,
+              blanked, M.online, model_state());
       last_input = now;
       if (blanked) { /* the press that wakes the screen is not a command */
         blanked = 0;
         backlight(1);
         dirty = 1;
+        rep_btn = -1;
         continue;
       }
       if (b == SDL_GAMEPAD_BUTTON_BACK) select_held = 1;
@@ -723,42 +1143,13 @@ int main(int argc, char **argv) {
         quit_flag = 1;
         break;
       }
-      int vol_pct = (int)((M.volume * 100 + 32767) / 65535);
-      char cmd[48];
-      switch ((int)b) {
-      case SDL_GAMEPAD_BUTTON_SOUTH: send_cmd("toggle"); break;
-      case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: send_cmd("prev"); break;
-      case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: send_cmd("next"); break;
-      case SDL_GAMEPAD_BUTTON_DPAD_LEFT:
-      case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: {
-        int64_t p = (int64_t)position_now(now) + (b == SDL_GAMEPAD_BUTTON_DPAD_RIGHT ? 10000 : -10000);
-        if (p < 0) p = 0;
-        snprintf(cmd, sizeof cmd, "seek %lld", (long long)p);
-        send_cmd(cmd);
-        break;
-      }
-      case SDL_GAMEPAD_BUTTON_DPAD_UP:
-      case SDL_GAMEPAD_BUTTON_DPAD_DOWN:
-      case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER + 100:
-      case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER + 100: {
-        int up = b == SDL_GAMEPAD_BUTTON_DPAD_UP || b == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER + 100;
-        int v = vol_pct + (up ? 5 : -5);
-        v = v < 0 ? 0 : v > 100 ? 100 : v;
-        snprintf(cmd, sizeof cmd, "volume %d", v);
-        send_cmd(cmd);
-        M.volume = (uint32_t)(v * 65535 / 100); /* show it before the event */
-        break;
-      }
-      case SDL_GAMEPAD_BUTTON_WEST: /* X */
-        snprintf(cmd, sizeof cmd, "shuffle %s", M.shuffle ? "off" : "on");
-        send_cmd(cmd);
-        break;
-      case SDL_GAMEPAD_BUTTON_NORTH: /* Y */
-        snprintf(cmd, sizeof cmd, "repeat %s", M.repeat ? "off" : "on");
-        send_cmd(cmd);
-        break;
-      default: break;
-      }
+      handle_press((int)b, now);
+      dirty = 1;
+    }
+    if (rep_btn >= 0 && now >= rep_next && !blanked) {
+      rep_next = now + 80;
+      last_input = now;
+      handle_press(rep_btn, now);
       dirty = 1;
     }
 
@@ -768,7 +1159,7 @@ int main(int argc, char **argv) {
     }
     if (blanked) continue; /* nothing to draw, nothing to upload */
 
-    uint64_t tick_ms = M.online && is_playing() ? 80 : 500;
+    uint64_t tick_ms = (view == V_NOW && M.online && is_playing()) || view == V_LIST || view == V_OSK ? 80 : 500;
     if ((dirty || now - last_draw >= tick_ms) && now - last_draw >= 33) {
       last_draw = now;
       dirty = 0;

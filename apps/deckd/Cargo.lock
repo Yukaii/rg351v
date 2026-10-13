@@ -393,8 +393,10 @@ checksum = "2a2330da5de22e8a3cb63252ce2abb30116bf5265e89c0e01bc17015ce30a476"
 name = "deckd"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "env_logger",
  "futures-util",
+ "http",
  "librespot-connect",
  "librespot-core",
  "librespot-discovery",
@@ -402,6 +404,8 @@ dependencies = [
  "librespot-playback",
  "librespot-protocol",
  "log",
+ "protobuf",
+ "serde_json",
  "sha1",
  "tokio",
 ]

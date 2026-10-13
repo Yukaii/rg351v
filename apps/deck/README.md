@@ -37,8 +37,11 @@ Premium); local-file playback is a separate, later project.
       preview: `cc -DDECK_NO_SDL apps/deck/src/main.c -lm` then
       `DECK_ASSETS=.storage/ptterm-data DECK_DUMP=out.ppm ./a.out`.
 - [ ] On-device check of deck v0 (input, blanking, exit combo, CPU).
-- [ ] Library browsing: playlists, liked songs, search (needs deckd metadata
-      commands), real album art.
+- [x] Library browsing (v0): deckd `playlists`, `tracks <ctx> <offset>`,
+      `search <offset> <query>`, `play <ctx|-> <track>`; deck has a library
+      menu, scrolling lists with lazy paging and D-pad key-repeat, and an OSK
+      for search (START from now-playing opens the library).
+- [ ] On-device check of browsing; real album art; albums/artists/queue.
 
 ## Constraints that shaped the design
 
@@ -65,9 +68,13 @@ Spotify app / deck UI
    deck   (C, SDL3 KMSDRM)  = ptterm's renderer, fonts and on-screen keyboard
 ```
 
-- Web API tokens come from librespot's token provider for the logged-in
-  session (the way ncspot and spotify-player work), so no developer app,
-  user cap or redirect URL is needed on a keyboardless device.
+- Browsing uses librespot's internal endpoints, not the Web API: the
+  keymaster token route (`session.token_provider()`) now answers 403 "Invalid
+  client" for librespot's client id (2026-10-13). Playlists come from
+  `spclient().get_rootlist()` (names are decorated into the response),
+  track names from `Track::get`, liked songs from the context
+  `spotify:user:<name>:collection` and search from `spotify:search:<q>`
+  (tracks only) via `get_context()`.
 - `deck` is started from the Homebrew menu with the same jslisten exit-combo
   plumbing as ptterm and may be killed freely; `deckd` keeps the music going.
 
@@ -112,6 +119,12 @@ Binary and unit live under `/storage/.config/rg351v/` and
 
 `/run/rg351v/deckd.sock`, one request per line:
 
+- `playlists`, `tracks <liked|playlist uri> [offset]`, `search <offset>
+  <query>` -> `page\t<offset>\t<total>`, optional `context\t<uri>`, then
+  `item\t<playlist|track>\t<uri>\t<title>\t<subtitle>` lines, then `.`
+  (24 items per page); `play <context uri|-> <track uri>` plays a track
+  inside a context (or alone with autoplay for `-`); `web <path>` is a debug
+  probe of the Web API (currently fails with 403)
 - `status` -> `key=value` lines (state, connected, user, uri, title, artist,
   album, cover, duration_ms, position_ms, volume, shuffle, repeat) ending with
   a line containing `.`
