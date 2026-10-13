@@ -31,6 +31,8 @@ CONF="$CONF_DIR/autosleep.conf"
 REMOTE_PY="$CONF_DIR/autosleep.py"
 UNIT=rg351v-autosleep.service
 UNIT_DIR="/storage/.config/system.d"
+# Quiesces Wi-Fi before the stock sleep hook unloads dwc2 (see the unit).
+SLEEP_UNIT=rg351v-wifi-sleep.service
 
 die() {
   echo "$*" >&2
@@ -57,12 +59,15 @@ install)
   remote "mkdir -p $CONF_DIR $UNIT_DIR/multi-user.target.wants"
   "${SCP[@]}" "$HERE/device/autosleep.py" "$HOST:$REMOTE_PY"
   "${SCP[@]}" "$HERE/device/$UNIT" "$HOST:$UNIT_DIR/$UNIT"
+  "${SCP[@]}" "$HERE/device/$SLEEP_UNIT" "$HOST:$UNIT_DIR/$SLEEP_UNIT"
   # Keep an existing config on upgrade; only a fresh install takes the default.
   remote "[ -f $CONF ] || echo 'IDLE_MINUTES=$minutes' >$CONF"
   [[ -z "${2:-}" ]] || set_key IDLE_MINUTES "$minutes"
   # Enabled like the stock sshd.service (`systemctl enable` would write into
   # the read-only rootfs).
   remote "chmod 755 $REMOTE_PY &&
+    mkdir -p $UNIT_DIR/sleep.target.wants &&
+    ln -sf $UNIT_DIR/$SLEEP_UNIT $UNIT_DIR/sleep.target.wants/$SLEEP_UNIT &&
     ln -sf $UNIT_DIR/$UNIT $UNIT_DIR/multi-user.target.wants/$UNIT &&
     systemctl daemon-reload && systemctl restart $UNIT && sleep 1 &&
     echo \"service: \$(systemctl is-active $UNIT)\""
@@ -70,7 +75,8 @@ install)
 uninstall)
   assert_device
   remote "systemctl stop $UNIT 2>/dev/null;
-    rm -f $UNIT_DIR/multi-user.target.wants/$UNIT $UNIT_DIR/$UNIT;
+    rm -f $UNIT_DIR/multi-user.target.wants/$UNIT $UNIT_DIR/$UNIT \
+      $UNIT_DIR/sleep.target.wants/$SLEEP_UNIT $UNIT_DIR/$SLEEP_UNIT;
     systemctl daemon-reload; echo 'autosleep removed (config kept)'"
   ;;
 set)

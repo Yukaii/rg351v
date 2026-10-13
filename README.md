@@ -179,6 +179,25 @@ Host rg351v
   JS. No Linux handheld host upstream; only the PocketBook (fb blit) pattern
   applies. Decided not to pursue: the CPU is fast enough for it to be a
   non-event, and display output was never wired up.
+- Kernel panic on suspend (found 2026-10-13 via pstore): the stock sleep hook
+  runs `modprobe -r dwc2` and the Wi-Fi dongle driver oopses while it is torn
+  down with frames in flight (`rmmod dwc2 -> usb_disconnect ->
+  mt7601u_disconnect -> mt7601u_dma_cleanup -> ieee80211_tx_status ->
+  put_pid`), then `panic=20` reboots the board. It looks like a freeze to the
+  user. `rg351v-wifi-sleep.service` (installed by `autosleep.sh install`,
+  `Before=sleep.target`) takes wlan0 down first; 4 suspend cycles under a
+  ping flood gave no oops. The previous crash is readable on the device in
+  `/sys/fs/pstore/dmesg-ramoops-*` (RAM, lost on power-off); journald is
+  volatile (`/run/log`), so pstore is the only record of an earlier boot.
+  Powering on with the charger can look like a power-key press to logind
+  (`Power key pressed short` ~35 s after boot), which suspends at once.
+- Spotify queue: the dealer never echoes our own device's state back, so
+  `hm://connect-state/v1/cluster` listeners stay silent. `GET
+  /connect-state/v1/cluster` on spclient returns the live state (context_uri,
+  next_tracks, provider `queue` for user-queued tracks) and is used for the
+  queue view and for keeping `context` fresh. A freshly started or rebuilt
+  session ignores `load` ("will be ignored while Not Active") until
+  `activate()` is called first.
 - Auto-suspend: stock AmberELEC has none. ES `ScreenSaverBehavior=black` only
   draws black (SoC, Wi-Fi and backlight stay on, ~450 mA); logind
   `IdleAction` needs session idle hints that ES never sends. `autosleep.py`

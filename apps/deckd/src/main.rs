@@ -74,12 +74,24 @@ impl Play {
     }
 }
 
+/// One upcoming track from the cluster state.
+#[derive(Clone, Debug, Default)]
+struct QItem {
+    uri: String,
+    /// Added by the user ("queue" provider) rather than coming from the context.
+    queued: bool,
+    title: String,
+    artist: String,
+}
+
 #[derive(Clone, Debug)]
 struct State {
     play: Play,
     uri: String,
     /// Playing context (playlist/album/...) from Connect cluster updates.
     context: String,
+    /// Upcoming tracks as last reported by the cluster (next_tracks).
+    queue: Vec<QItem>,
     title: String,
     artist: String,
     album: String,
@@ -104,6 +116,7 @@ impl State {
             play: Play::Stopped,
             uri: String::new(),
             context: String::new(),
+            queue: Vec::new(),
             title: String::new(),
             artist: String::new(),
             album: String::new(),
@@ -177,6 +190,9 @@ enum Cmd {
     Shuffle(bool),
     Repeat(bool),
     Load(String),
+    /// Skip forward `n` tracks (the queue view jumps this way, which keeps
+    /// the context and the user queue intact).
+    Skip(u32),
     /// Play `track`, inside `context` when given.
     PlayTrack { context: Option<String>, track: String },
     /// Drop the Spotify session on purpose (exercises the restore path).
@@ -263,22 +279,38 @@ fn session_of(sess: &SessShared) -> Result<Session, String> {
         .ok_or_else(|| "no session".to_string())
 }
 
+type NameCache = Mutex<std::collections::HashMap<String, (String, String)>>;
+
+fn name_cache() -> &'static NameCache {
+    static C: std::sync::OnceLock<NameCache> = std::sync::OnceLock::new();
+    C.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Title and artists of a track, cached (the cluster state usually carries
+/// them, otherwise one metadata lookup).
+async fn track_name(session: &Session, uri: &str) -> Option<(String, String)> {
+    if let Some(v) = name_cache().lock().unwrap().get(uri) {
+        return Some(v.clone());
+    }
+    let id = SpotifyUri::from_uri(uri).ok()?;
+    let t = Track::get(session, &id).await.ok()?;
+    let artists = t
+        .artists
+        .iter()
+        .map(|a| a.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let v = (t.name, artists);
+    name_cache().lock().unwrap().insert(uri.to_string(), v.clone());
+    Some(v)
+}
+
 /// `item\tkind\turi\ttitle\tsubtitle` lines for a slice of track URIs.
 async fn track_items(session: &Session, uris: &[String]) -> String {
     let rows = join_all(uris.iter().map(|u| async move {
-        let named = async {
-            let id = SpotifyUri::from_uri(u).ok()?;
-            let t = Track::get(session, &id).await.ok()?;
-            let artists = t
-                .artists
-                .iter()
-                .map(|a| a.name.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
-            Some((t.name, artists))
-        }
-        .await;
-        let (name, artist) = named.unwrap_or_else(|| (u.clone(), String::new()));
+        let (name, artist) = track_name(session, u)
+            .await
+            .unwrap_or_else(|| (u.clone(), String::new()));
         format!("item\ttrack\t{u}\t{}\t{}\n", clean(&name), clean(&artist))
     }))
     .await;
@@ -525,6 +557,72 @@ async fn saved_albums(session: &Session) -> Result<Vec<String>, String> {
     Ok(uris)
 }
 
+/// Read our device's live state (context and upcoming tracks) from the
+/// connect-state service. The server does not echo our own state back over
+/// the dealer, so this endpoint is the only place it can be read.
+async fn refresh_cluster(session: &Session, state: &Shared) -> Result<(), String> {
+    let body = session
+        .spclient()
+        .request(&http::Method::GET, "/connect-state/v1/cluster", None, None)
+        .await
+        .map_err(|e| format!("cluster: {e}"))?;
+    let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| format!("cluster json: {e}"))?;
+    let ps = &v["player_state"];
+    let ctx = ps["context_uri"].as_str().unwrap_or("").to_string();
+    let queue: Vec<QItem> = ps["next_tracks"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| {
+                    let uri = t["uri"].as_str()?;
+                    if !uri.starts_with("spotify:track:") {
+                        return None;
+                    }
+                    let md = &t["metadata"];
+                    Some(QItem {
+                        uri: uri.to_string(),
+                        queued: t["provider"].as_str() == Some("queue"),
+                        title: md["title"].as_str().unwrap_or("").to_string(),
+                        artist: md["artist_name"].as_str().unwrap_or("").to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut st = state.lock().unwrap();
+    // Only trust it when this device is the one playing.
+    if v["active_device_id"].as_str() == Some(&session.device_id()) || st.play != Play::Stopped {
+        if !ctx.is_empty() {
+            st.context = ctx;
+        }
+        st.queue = queue;
+    }
+    Ok(())
+}
+
+/// The upcoming queue: user-queued tracks first, then the context's next tracks.
+async fn list_queue(session: &Session, state: &Shared) -> Result<String, String> {
+    refresh_cluster(session, state).await?;
+    let (q, ctx) = {
+        let st = state.lock().unwrap();
+        (st.queue.clone(), st.context.clone())
+    };
+    let rows = join_all(q.iter().take(60).map(|it| async move {
+        let (name, artist) = if !it.title.is_empty() {
+            (it.title.clone(), it.artist.clone())
+        } else {
+            track_name(session, &it.uri)
+                .await
+                .unwrap_or_else(|| (it.uri.clone(), String::new()))
+        };
+        let kind = if it.queued { "queued" } else { "track" };
+        format!("item\t{kind}\t{}\t{}\t{}\n", it.uri, clean(&name), clean(&artist))
+    }))
+    .await;
+    let ctx = if ctx.is_empty() { "-".to_string() } else { ctx };
+    Ok(format!("page\t0\t{}\ncontext\t{ctx}\n{}", q.len().min(60), rows.concat()))
+}
+
 async fn list_albums(session: &Session, offset: usize) -> Result<String, String> {
     let uris = saved_albums(session).await?;
     let total = uris.len();
@@ -749,6 +847,7 @@ fn parse_cmd(line: &str) -> Result<Cmd, String> {
         "repeat" => Cmd::Repeat(onoff(arg)?),
         "load" => Cmd::Load(arg.ok_or("missing uri")?.to_string()),
         "reconnect" => Cmd::Reconnect,
+        "skip" => Cmd::Skip(num(arg)?.clamp(1, 60)),
         "play" if arg.is_some() => {
             let track = it.next().ok_or("usage: play <context|-> <track uri>")?;
             Cmd::PlayTrack {
@@ -791,6 +890,13 @@ async fn serve_client(
                     "quit" => return,
                     "playlists" => match session_of(&sess) {
                         Ok(se) => match list_playlists(&se).await {
+                            Ok(b) => format!("{b}.\n"),
+                            Err(e) => format!("ERR {}\n", clean(&e)),
+                        },
+                        Err(e) => format!("ERR {e}\n"),
+                    },
+                    "queue" => match session_of(&sess) {
+                        Ok(se) => match list_queue(&se, &state).await {
                             Ok(b) => format!("{b}.\n"),
                             Err(e) => format!("ERR {}\n", clean(&e)),
                         },
@@ -1021,6 +1127,11 @@ async fn main() {
     let mut pending: Option<(Cmd, Instant)> = None;
     let mono_start = Instant::now();
     let mut boot_off = boot_seconds();
+    // After a reboot Spotify still lists this device as the active player and
+    // resumes it as soon as the session is up. Playback that starts by itself
+    // in the first seconds, before anyone asked for it, is paused again.
+    const BOOT_GUARD: Duration = Duration::from_secs(25);
+    let mut boot_guard = true;
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     let last_path = opts.cache.join("deckd-last");
     let mut last: Option<Last> = load_last(&last_path);
@@ -1144,6 +1255,18 @@ async fn main() {
             ev = player_events.recv() => {
                 match ev {
                     Some(ev) => {
+                        if boot_guard && mono_start.elapsed() > BOOT_GUARD {
+                            boot_guard = false;
+                        }
+                        if boot_guard
+                            && matches!(ev, PlayerEvent::Loading { .. } | PlayerEvent::Playing { .. })
+                        {
+                            if let Some(s) = spirc.as_ref() {
+                                info!("playback started by itself right after boot; pausing it");
+                                let _ = s.pause();
+                                boot_guard = false;
+                            }
+                        }
                         if let PlayerEvent::TrackChanged { audio_item } = &ev {
                             let url = pick_cover(audio_item);
                             state.lock().unwrap().cover_file.clear();
@@ -1156,6 +1279,15 @@ async fn main() {
                                             let _ = tx.send("cover".into());
                                         }
                                         Err(e) => warn!("cover: {e}"),
+                                    }
+                                });
+                                // Keep the context fresh (restore, queue view)
+                                // once the new track's state has been published.
+                                let (se, st) = (session.clone(), state.clone());
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                                    if let Err(e) = refresh_cluster(&se, &st).await {
+                                        warn!("{e}");
                                     }
                                 });
                             }
@@ -1201,13 +1333,42 @@ async fn main() {
                     Some(Ok(u)) => {
                         if let Some(c) = u.cluster.as_ref() {
                             // Only our own state tells us what we are playing.
-                            if c.active_device_id == session_config.device_id
-                                && !c.player_state.context_uri.is_empty()
-                            {
+                            let ours = c.active_device_id == session_config.device_id;
+                            let ps = &c.player_state;
+                            info!(
+                                "cluster: active={} ours={} ctx={} next={} prev={}",
+                                c.active_device_id,
+                                ours,
+                                ps.context_uri,
+                                ps.next_tracks.len(),
+                                ps.prev_tracks.len()
+                            );
+                            if ours {
                                 let mut st = state.lock().unwrap();
-                                if st.context != c.player_state.context_uri {
-                                    st.context = c.player_state.context_uri.clone();
-                                    drop(st);
+                                let mut changed = false;
+                                if !ps.context_uri.is_empty() && st.context != ps.context_uri {
+                                    st.context = ps.context_uri.clone();
+                                    changed = true;
+                                }
+                                let q: Vec<QItem> = ps
+                                    .next_tracks
+                                    .iter()
+                                    .filter(|t| t.uri.starts_with("spotify:track:"))
+                                    .map(|t| QItem {
+                                        uri: t.uri.clone(),
+                                        queued: t.provider == "queue",
+                                        title: t.metadata.get("title").cloned().unwrap_or_default(),
+                                        artist: t.metadata.get("artist_name").cloned().unwrap_or_default(),
+                                    })
+                                    .collect();
+                                if q.len() != st.queue.len()
+                                    || q.iter().zip(st.queue.iter()).any(|(a, b)| a.uri != b.uri)
+                                {
+                                    st.queue = q;
+                                    changed = true;
+                                }
+                                drop(st);
+                                if changed {
                                     let _ = events_tx.send("context".into());
                                 }
                             }
@@ -1218,6 +1379,9 @@ async fn main() {
                 }
             },
             cmd = cmd_rx.recv() => {
+                if cmd.is_some() {
+                    boot_guard = false; // someone is driving it on purpose
+                }
                 match (cmd, spirc.as_ref()) {
                     (Some(Cmd::Reconnect), _) => {
                         info!("reconnect requested");
@@ -1390,7 +1554,7 @@ fn dispatch(s: &Spirc, cmd: Cmd, idle: bool, last: &Option<Last>) {
 fn queueable(cmd: &Cmd) -> bool {
     matches!(
         cmd,
-        Cmd::Play | Cmd::Toggle | Cmd::Next | Cmd::Prev | Cmd::Load(_) | Cmd::PlayTrack { .. }
+        Cmd::Play | Cmd::Toggle | Cmd::Next | Cmd::Prev | Cmd::Skip(_) | Cmd::Load(_) | Cmd::PlayTrack { .. }
     )
 }
 
@@ -1414,7 +1578,20 @@ fn run_cmd(s: &Spirc, cmd: Cmd) {
         Cmd::Shuffle(b) => s.shuffle(b),
         Cmd::Repeat(b) => s.repeat(b),
         Cmd::Reconnect => Ok(()),
+        Cmd::Skip(n) => {
+            let mut r = Ok(());
+            for _ in 0..n {
+                r = s.next();
+                if r.is_err() {
+                    break;
+                }
+            }
+            r
+        }
         Cmd::PlayTrack { context, track } => {
+            // A device that has not played yet (fresh start, rebuilt
+            // session) ignores load commands until it is activated.
+            let _ = s.activate();
             let opts = LoadRequestOptions {
                 start_playing: true,
                 playing_track: Some(PlayingTrack::Uri(track.clone())),
@@ -1433,6 +1610,7 @@ fn run_cmd(s: &Spirc, cmd: Cmd) {
             }
         }
         Cmd::Load(uri) => {
+            let _ = s.activate();
             let opts = LoadRequestOptions {
                 start_playing: true,
                 ..Default::default()

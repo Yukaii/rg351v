@@ -1,0 +1,17 @@
+[Unit]
+Description=Quiesce Wi-Fi before suspend
+# The stock sleep hook unloads dwc2 (the USB controller) right after this.
+# With frames still in flight the mt7601u driver oopses in
+# mt7601u_dma_cleanup -> ieee80211_tx_status, which panics the kernel.
+# Taking the interface down first flushes its transmit queue.
+Before=sleep.target
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'ip link set wlan0 down 2>/dev/null; sleep 1; exit 0'
+ExecStop=/bin/sh -c 'ip link set wlan0 up 2>/dev/null; exit 0'
+
+[Install]
+WantedBy=sleep.target

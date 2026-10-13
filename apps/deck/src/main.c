@@ -276,7 +276,7 @@ static uint32_t mix(uint32_t h) {
 static void send_cmd(const char *line);
 
 typedef struct {
-  char kind; /* 'p' playlist, 'a' album, 't' track */
+  char kind; /* 'p' playlist, 'a' album, 'q' queued by the user, 't' track */
   char uri[96];
   char title[160];
   char sub[96];
@@ -317,6 +317,8 @@ static void list_request(int more) {
     snprintf(cmd, sizeof cmd, "playlists");
   else if (!strcmp(list_ctx, "albums"))
     snprintf(cmd, sizeof cmd, "albums %d", off);
+  else if (!strcmp(list_ctx, "queue"))
+    snprintf(cmd, sizeof cmd, "queue");
   else if (!strncmp(list_ctx, "search:", 7))
     snprintf(cmd, sizeof cmd, "search %d %s", off, list_ctx + 7);
   else
@@ -590,20 +592,20 @@ static void draw_scrollbar(int x, int y, int h, int n, int top_i, int rows) {
 
 static void draw_menu(uint64_t t_ms) {
   draw_header(t_ms);
-  static const char *const ENT[5] = {"LIKED SONGS", "ALBUMS", "PLAYLISTS", "SEARCH", "NOW PLAYING"};
-  static const char *const DESC[5] = {"your saved tracks", "albums you saved, newest first",
-                                      "your library lists", "find tracks by name",
-                                      "back to the player"};
-  text(24, 38, "LIBRARY", T->accent, 1);
-  for (int i = 0; i < 5; i++) {
-    int y = 64 + i * 76;
+  static const char *const ENT[6] = {"LIKED SONGS", "ALBUMS", "PLAYLISTS", "QUEUE", "SEARCH", "NOW PLAYING"};
+  static const char *const DESC[6] = {"your saved tracks", "albums you saved, newest first",
+                                      "your library lists", "what plays next",
+                                      "find tracks by name", "back to the player"};
+  text(24, 36, "LIBRARY", T->accent, 1);
+  for (int i = 0; i < 6; i++) {
+    int y = 56 + i * 64;
     if (i == menu_sel) {
-      fill(16, y - 8, SCR_W - 32, 66, 0xFF14110A);
-      brackets(16, y - 8, SCR_W - 32, 66, 12, T->hi);
+      fill(16, y - 6, SCR_W - 32, 58, 0xFF14110A);
+      brackets(16, y - 6, SCR_W - 32, 58, 12, T->hi);
     }
     text(40, y, ENT[i], i == menu_sel ? T->hi : T->mid, 2);
-    text(40, y + 34, DESC[i], T->dim, 1);
-    if (i == menu_sel) text_right(SCR_W - 40, y + 8, ">", T->hi, 2);
+    text(40, y + 32, DESC[i], T->dim, 1);
+    if (i == menu_sel) text_right(SCR_W - 40, y + 6, ">", T->hi, 2);
   }
 }
 
@@ -630,7 +632,8 @@ static void draw_list(uint64_t t_ms) {
     int cur = idx == sel;
     if (cur) fill(12, y - 2, SCR_W - 32, LIST_RH, T->dim);
     const Item *it = &items[idx];
-    text(18, y, it->kind == 'p' ? "=" : it->kind == 'a' ? "#" : ">", cur ? T->hi : T->dim, 1);
+    text(18, y, it->kind == 'p' ? "=" : it->kind == 'a' ? "#" : it->kind == 'q' ? "+" : ">",
+         cur ? T->hi : T->dim, 1);
     int tw = it->sub[0] ? 380 : 580;
     if (cur)
       marquee(34, y, tw, it->title, T->hi, 1, since_sel);
@@ -685,6 +688,8 @@ static void draw_hint(void) {
   fill(0, SCR_H - 24, SCR_W, 24, 0xFF14110A);
   fill(0, SCR_H - 24, SCR_W, 2, T->dim);
   const char *h = view == V_MENU   ? "UP/DN:Choose A:Open B:Back START:Now playing SEL+START:Leave"
+                  : view == V_LIST && !strcmp(list_ctx, "queue")
+                      ? "A:Jump to track L1/R1:Page B:Back START:Now playing  (+ = queued by you)"
                   : view == V_LIST ? "A:Open/Play X:Play all L1/R1:Page B:Back START:Now playing"
                   : view == V_OSK  ? "Arrows:Move A:Type B:Delete X:Space START:Search Y:Cancel"
                   : !M.online || !M.connected
@@ -853,7 +858,7 @@ static int conn_read(uint64_t now_ms) {
       }
       if (n_items < MAX_ITEMS && f[0] && f[1] && f[2]) {
         Item *it = &items[n_items++];
-        it->kind = f[0][0] == 'p' ? 'p' : f[0][0] == 'a' ? 'a' : 't';
+        it->kind = f[0][0] == 'p' ? 'p' : f[0][0] == 'a' ? 'a' : f[0][0] == 'q' ? 'q' : 't';
         snprintf(it->uri, sizeof it->uri, "%s", f[1]);
         snprintf(it->title, sizeof it->title, "%s", f[2]);
         snprintf(it->sub, sizeof it->sub, "%s", f[3] ? f[3] : "");
@@ -983,15 +988,16 @@ static void handle_press(int b, uint64_t now) {
   const int START = SDL_GAMEPAD_BUTTON_START;
 
   if (view == V_MENU) {
-    if (b == UP) menu_sel = (menu_sel + 4) % 5;
-    else if (b == DN) menu_sel = (menu_sel + 1) % 5;
+    if (b == UP) menu_sel = (menu_sel + 5) % 6;
+    else if (b == DN) menu_sel = (menu_sel + 1) % 6;
     else if (b == B || b == START) view = V_NOW;
     else if (b == A) {
       depth = 0;
       if (menu_sel == 0) open_list("liked", "LIKED SONGS");
       else if (menu_sel == 1) open_list("albums", "ALBUMS");
       else if (menu_sel == 2) open_list("playlists", "PLAYLISTS");
-      else if (menu_sel == 3) { search_q[0] = 0; osk_r = osk_c = 0; view = V_OSK; }
+      else if (menu_sel == 3) open_list("queue", "UP NEXT");
+      else if (menu_sel == 4) { search_q[0] = 0; osk_r = osk_c = 0; view = V_OSK; }
       else view = V_NOW;
     }
     return;
@@ -1016,18 +1022,24 @@ static void handle_press(int b, uint64_t now) {
     else if (b == R1 || b == RT) sel = sel + page >= n_items ? (n_items ? n_items - 1 : 0) : sel + page;
     else if (b == B) pop_list();
     else if (b == START) view = V_NOW;
-    else if (b == A && sel < n_items) {
+    else if (b == A && sel < n_items && !strcmp(list_ctx, "queue")) {
+      /* items are in playback order, so n skips land exactly on it and the
+       * context and the user queue stay intact */
+      snprintf(cmd, sizeof cmd, "skip %d", sel + 1);
+      send_cmd(cmd);
+      view = V_NOW;
+    } else if (b == A && sel < n_items) {
       const Item *it = &items[sel];
-      if (it->kind != 't') {
+      if (it->kind == 'p' || it->kind == 'a') {
         push_list(it->uri, it->title);
       } else {
         snprintf(cmd, sizeof cmd, "play %s %s", play_ctx[0] ? play_ctx : "-", it->uri);
         send_cmd(cmd);
         view = V_NOW;
       }
-    } else if (b == X) {
+    } else if (b == X && strcmp(list_ctx, "queue") != 0) {
       const char *c = NULL;
-      if (n_items && sel < n_items && items[sel].kind != 't') c = items[sel].uri;
+      if (n_items && sel < n_items && (items[sel].kind == 'p' || items[sel].kind == 'a')) c = items[sel].uri;
       else if (play_ctx[0] && strcmp(play_ctx, "-") != 0) c = play_ctx;
       if (c) {
         snprintf(cmd, sizeof cmd, "load %s", c);

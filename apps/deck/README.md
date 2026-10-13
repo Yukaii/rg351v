@@ -56,8 +56,19 @@ Premium); local-file playback is a separate, later project.
       instead of waiting ~30 s for the websocket ping timeout; play/skip/load
       pressed while the session is down are held (120 s) and run when it is
       back; the UI says RECONNECTING instead of looking dead.
-- [ ] On-device check of art and reconnect; followed artists, saved shows
-      (same paging call, other set names), queue view.
+- [x] Queue view (menu > QUEUE): deckd `queue` reads the live state from
+      `GET /connect-state/v1/cluster` (user-queued tracks first, `+` in the
+      UI); A jumps with `skip <n>` (n x next), which keeps the context and
+      the user queue. deckd `skip <n>`; verified `skip 3` lands on the third
+      upcoming track.
+- [x] deckd activates the device before `load`/`play <ctx> <track>`; a fresh
+      session ignores those otherwise.
+- [x] Boot autoplay guard: playback that starts by itself in the first 25 s
+      after the daemon starts (Spotify resuming the old active device) is
+      paused again. Not reproduced here (a `kill -9` restart came back idle),
+      so it is a safety net.
+- [ ] Followed artists, saved shows (same paging call, other set names),
+      adding to the queue from a list.
 
 ## Constraints that shaped the design
 
