@@ -29,6 +29,9 @@ Notes, scripts and tweaks for my Anbernic RG351V running AmberELEC.
   awake idle ~448 mA / 1.7 W (~7.5 h); power-key suspend <1% drop over 69 min
   (i.e. <~29 mA, >100 h, at least 15x better than awake); SoC 49 C awake ->
   36 C asleep; Wi-Fi back within ~15 s of resume
+- [x] Auto-suspend (`scripts/autosleep.sh install [minutes]`): on-device
+  watcher suspends after N minutes without input; verified suspend + RTC wake
+  cycle (2026-10-13), installed at 5 min
 - [ ] Copy BIOS files / ROMs
 - [ ] Back up `/storage` (saves, configs) off-device
 - [ ] Decide on update strategy (AmberELEC releases)
@@ -141,11 +144,40 @@ Host rg351v
   assets with `apps/ptterm/tools/gen-assets.sh`, then
   `scripts/build-port.sh ptterm && scripts/deploy-port.sh ptterm`. Parser
   self-test: `apps/ptterm/tools/selftest.c` (replays captured BBS bytes).
+- `apps/pocketjs-host/` – headless PocketJS benchmark host (QuickJS guest +
+  Rust software rasterizer, no display). Needs a pocketjs checkout at
+  `.storage/pocketjs` (measured at `fcd49be`) with its bundle built via
+  `bun pocket compile --target pocketbook --manifest apps/hero/pocket.json`;
+  build for aarch64 in `rust:1-bookworm` (same glibc 2.36 as the device), run
+  with `POCKET_JS`/`POCKET_PAK`, `BENCH_FPS`, `BENCH_FULL=1`. Not a port yet:
+  nothing is presented on the screen.
 - `scripts/ptt-account.sh set|status|clear` – save the PTT ID/password that
   ptterm's Y button types on the login screen, to
   `/storage/.config/ptterm/account` (ext4, mode 600, not shared over SMB)
+- `scripts/autosleep.sh install|uninstall|set|status` – idle auto-suspend
+  service (`scripts/device/autosleep.py`, unit in `/storage/.config/system.d`,
+  config `/storage/.config/rg351v/autosleep.conf`: `IDLE_MINUTES`, `0` = off)
 - `scripts/lib/device.sh` – shared host/ssh/hostname-assert helpers
 - `.storage/` – git-ignored, for anything secret or machine-specific
+- PocketJS cost (2026-10-13, `hero` demo, 960x544 raster, headless): boot
+  ~250 ms, 19.6 MB RSS, 1.9 MB binary; normal UI frame ~1.9 ms flat out /
+  2.8 ms at 30 fps paced (~8% of one core, damage-driven); a full-screen
+  repaint every frame is ~19 ms of raster (~50 fps ceiling, 61% of a core at
+  30 fps). The guest is under 1 ms per frame, so cost is raster pixels, not
+  JS. No Linux handheld host upstream; only the PocketBook (fb blit) pattern
+  applies. Decided not to pursue: the CPU is fast enough for it to be a
+  non-event, and display output was never wired up.
+- Auto-suspend: stock AmberELEC has none. ES `ScreenSaverBehavior=black` only
+  draws black (SoC, Wi-Fi and backlight stay on, ~450 mA); logind
+  `IdleAction` needs session idle hints that ES never sends. `autosleep.py`
+  reads `/dev/input/event*` (the gamepad is a USB HID that re-enumerates on
+  every resume, so it rescans), ignores stick jitter below 10% of the axis
+  range, and holds off while charging, with an SSH session open, or with
+  Wi-Fi above 20 KB/s. The RTC (`rk808-rtc`, `/sys/class/rtc/rtc0/wakealarm`)
+  does wake the board from suspend, which makes unattended tests possible:
+  `AUTOSLEEP_CONF=... autosleep.py --once` plus `echo +100 > wakealarm`. While
+  it is installed the device suspends ~5 min after the last button press, so
+  SSH from the Mac drops until the power key wakes it.
 - Sleep: the power key runs a real kernel suspend (`mem`, logind
   `HandlePowerKey=suspend`). Wi-Fi is a USB MT7601U dongle with no wake-on-WLAN,
   and AmberELEC's `/usr/lib/systemd/system-sleep/sleep` hook unloads `dwc2`

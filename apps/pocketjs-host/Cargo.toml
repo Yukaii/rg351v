@@ -1,0 +1,23 @@
+# Headless PocketJS host for measuring what the runtime costs on the RG351V.
+#
+# Boots a compiled bundle (app.js + app.pak), drives scripted input and times
+# the guest turn, the core tick and the software raster. The engine crates come
+# from a pocketjs checkout under .storage/pocketjs (see
+# scripts/ports/pocketjs/port.conf for the pinned revision).
+[package]
+name = "pocketjs-host"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+pocketjs-core = { path = "../../.storage/pocketjs/engine/core" }
+pocket-mod = { path = "../../.storage/pocketjs/engine/crates/pocket-mod" }
+pocket-ui-surface = { path = "../../.storage/pocketjs/engine/crates/pocket-ui-surface" }
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+panic = "abort"
