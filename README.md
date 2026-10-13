@@ -121,6 +121,8 @@ Host rg351v
 - `scripts/battery-log.sh start|mark|status|stop|pull|summary` – on-device CSV
   sampler (`scripts/device/sample.sh`); the summary splits awake draw (mA, W,
   runtime estimate) from standby drain (%/h), per `mark` segment
+- `scripts/wifi.sh list|add|remove|push|status` – extra Wi-Fi networks via a
+  second connman file (`extra.config`); the ES menu only keeps one SSID
 - `scripts/lib/device.sh` – shared host/ssh/hostname-assert helpers
 - `.storage/` – git-ignored, for anything secret or machine-specific
 - Sleep: the power key runs a real kernel suspend (`mem`, logind
@@ -134,3 +136,9 @@ Host rg351v
 - Tuning knobs exposed in sysfs: cpufreq (1008/1200/1248/1296 MHz, governors
   incl. `powersave`/`schedutil`), GPU and DMC devfreq, backlight 0-100, Wi-Fi
   power save (currently off). All reset on reboot.
+- Wi-Fi is single-SSID in the ES menu: `batocera-config wifi enable` rewrites
+  `/storage/.cache/connman/wifi.config` (one fixed `service_amberelec_default`
+  block) on every save. connman reads every `*.config` in that directory live,
+  so extra networks go in `extra.config` via `scripts/wifi.sh` (keep
+  passphrases in `.storage/wifi-networks`). The ES Wi-Fi screen will not list
+  them. Idle floor measured: ~450 mA (~7.5 h) at brightness 24, ES menu.

@@ -77,7 +77,8 @@ dts = [b["ts"] - a["ts"] for a, b in zip(rows, rows[1:])]
 gap = max(3 * statistics.median(dts), 60)
 
 # Segment boundaries: row 0 plus each mark.
-bounds = [(0, "start")] + [(i, l) for i, l in marks if 0 < i < len(rows)]
+first = next((l for i, l in marks if i == 0), "start")
+bounds = [(0, first)] + [(i, l) for i, l in marks if 0 < i < len(rows)]
 bounds.append((len(rows) - 1, None))
 
 def hms(s):
