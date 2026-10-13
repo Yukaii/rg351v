@@ -1,0 +1,21 @@
+[Unit]
+Description=Spotify Connect daemon for the deck player (deckd)
+After=network-online.target sound.target
+Wants=network-online.target
+# Same Connect device name and cache as the plain librespot service.
+Conflicts=rg351v-librespot.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'mkdir -p /run/rg351v /storage/.cache/librespot'
+ExecStart=/storage/.config/rg351v/bin/deckd \
+  --name RG351V --device default \
+  --cache /storage/.cache/librespot \
+  --bitrate 160 --initial-volume 50
+ExecStopPost=/bin/rm -f /run/rg351v/playing /run/rg351v/deckd.sock
+Restart=always
+RestartSec=5
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

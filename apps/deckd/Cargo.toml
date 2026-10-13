@@ -1,0 +1,30 @@
+# deckd: Spotify Connect daemon for the RG351V deck player.
+#
+# librespot as a library (session, Connect/Spirc, player, discovery) plus a
+# Unix control socket, a now-playing state and playback restore after the
+# session drops. See apps/deck/README.md.
+[package]
+name = "deckd"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+# rustls, as in the librespot build: the device has no OpenSSL 3.
+librespot-core = { version = "0.8.0", default-features = false, features = ["rustls-tls-native-roots"] }
+librespot-connect = { version = "0.8.0", default-features = false }
+librespot-metadata = { version = "0.8.0", default-features = false }
+librespot-playback = { version = "0.8.0", default-features = false, features = ["alsa-backend"] }
+librespot-discovery = { version = "0.8.0", default-features = false, features = ["with-libmdns"] }
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "signal", "sync", "time"] }
+futures-util = "0.3"
+log = "0.4"
+env_logger = "0.11"
+sha1 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"

@@ -10,9 +10,9 @@ It does not suspend while:
   * the device is charging (SKIP_WHEN_CHARGING=1),
   * an SSH session is open (SKIP_WHEN_REMOTE=1),
   * Wi-Fi is moving data faster than BUSY_KBPS (a copy or download),
-  * music is playing: librespot's event hook keeps /run/rg351v/playing while a
+  * music is playing: deckd keeps /run/rg351v/playing while a
     track plays (a stop within the last 45 s still counts, to bridge track
-    changes), and only while librespot is running.
+    changes), and only while deckd (or librespot) is running.
 
 Config (re-read every loop, so `autosleep.sh set` needs no restart):
   /storage/.config/rg351v/autosleep.conf   KEY=value lines
@@ -189,7 +189,7 @@ def music_playing():
         if not recent:
             return False
     for comm in glob.glob("/proc/[0-9]*/comm"):
-        if read_text(comm) == "librespot":
+        if read_text(comm) in ("deckd", "librespot"):
             return True
     return False
 

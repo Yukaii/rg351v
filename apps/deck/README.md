@@ -8,9 +8,27 @@ Premium); local-file playback is a separate, later project.
 - [x] Step 1: `librespot` runs as a systemd service and plays through ALSA as
       a Spotify Connect device named `RG351V` (`scripts/spotify.sh`).
 - [x] Playing flag keeps `autosleep.py` from suspending mid-playlist.
-- [ ] First login from a phone (Connect devices -> RG351V), then measure CPU,
-      mixing with ES/games and behaviour across suspend and Wi-Fi drops.
-- [ ] Step 2: `deckd`, the control daemon.
+- [x] First login from a phone (Connect devices -> RG351V); credentials
+      cached, later starts log in by themselves.
+- [x] Measured (2026-10-13, 160 kbps): 5.8% of one core at 1008 MHz, 17 MB
+      RSS; autosleep held off for 392 s of idle playback; survived a forced
+      suspend (same PID, ALSA recovered, Connect session re-established ~6 s
+      after resume, playback continued); a second ALSA stream mixes in via
+      `dmix` without warnings.
+- [ ] Mixing with a real game/emulator (RetroArch may use its own ALSA setup).
+- [x] Step 2 (v0): `deckd` (apps/deckd) replaces the librespot binary:
+      Connect device + ALSA player, control socket, now-playing state,
+      playing flag for autosleep, 8 MB RSS. Built with rustls (the device has
+      no OpenSSL 3) and a Cargo.lock seeded from librespot 0.8.0.
+- [x] Restore after a dropped session (verified with `ctl reconnect`: back
+      as the active device within ~4 s, position kept to the second). The
+      player keeps playing a buffered track through an outage, but the new
+      Connect session is idle, so deckd re-loads the current track at the
+      current position with autoplay on. The queue/context is not restored.
+      Cutting Wi-Fi for 15 s or 90 s did not always drop the session
+      (TCP and the websocket often ride it out), so `reconnect` is the
+      deterministic test.
+- [ ] Context-level restore, playlists/search/library browsing (metadata).
 - [ ] Step 3: `deck`, the SDL3 UI.
 
 ## Constraints that shaped the design
@@ -66,14 +84,29 @@ Spotify app / deck UI
 - Offline is out of scope: Spotify downloads are DRM-bound to its own
   clients and are not reproduced here.
 
-## Step 1 operations
+## Operations
 
 ```sh
-scripts/spotify.sh build      # librespot 0.8.0 for aarch64 (Docker)
-scripts/spotify.sh install    # binary + event hook + systemd unit
-scripts/spotify.sh status     # service, login cache, playing flag, log
+scripts/spotify.sh build      # deckd for aarch64 (Docker, rust:1-bookworm)
+scripts/spotify.sh install    # binary + systemd unit (replaces librespot's)
+scripts/spotify.sh status     # service, login cache, log, now playing
+scripts/spotify.sh ctl toggle # play/pause/next/prev/seek/volume/load ...
 scripts/spotify.sh logout     # forget the cached login
 ```
 
-Binary, hook and login live under `/storage/.config/rg351v/` and
-`/storage/.cache/librespot`.
+Binary and unit live under `/storage/.config/rg351v/` and
+`/storage/.config/system.d`; the login cache is `/storage/.cache/librespot`.
+
+## Control socket protocol
+
+`/run/rg351v/deckd.sock`, one request per line:
+
+- `status` -> `key=value` lines (state, connected, user, uri, title, artist,
+  album, cover, duration_ms, position_ms, volume, shuffle, repeat) ending with
+  a line containing `.`
+- `play | pause | toggle | next | prev`, `seek <ms>`, `volume <0-100>`,
+  `shuffle on|off`, `repeat on|off`, `load <spotify uri>`, `reconnect`
+  (drops the session on purpose) -> `OK` / `ERR msg`
+- `subscribe` -> `OK`, then `event <name>` lines (track, playing, paused,
+  stopped, loading, volume, shuffle, repeat, session); re-read `status` on
+  each event.

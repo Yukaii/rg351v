@@ -32,9 +32,10 @@ Notes, scripts and tweaks for my Anbernic RG351V running AmberELEC.
 - [x] Auto-suspend (`scripts/autosleep.sh install [minutes]`): on-device
   watcher suspends after N minutes without input; verified suspend + RTC wake
   cycle (2026-10-13), installed at 5 min
-- [x] Spotify Connect speaker (`scripts/spotify.sh install`): librespot 0.8.0
-  as a systemd service, plays through ALSA; first login pending from a phone
-  (design and roadmap in `apps/deck/README.md`)
+- [x] Spotify Connect (`scripts/spotify.sh install`): `deckd`
+  (librespot 0.8.0 as a library, `apps/deckd`) as a systemd service, plays
+  through ALSA, logged in from a phone once; control socket and restore after
+  dropped sessions (design and roadmap in `apps/deck/README.md`)
 - [ ] Copy BIOS files / ROMs
 - [ ] Back up `/storage` (saves, configs) off-device
 - [ ] Decide on update strategy (AmberELEC releases)
@@ -160,9 +161,10 @@ Host rg351v
 - `scripts/autosleep.sh install|uninstall|set|status` – idle auto-suspend
   service (`scripts/device/autosleep.py`, unit in `/storage/.config/system.d`,
   config `/storage/.config/rg351v/autosleep.conf`: `IDLE_MINUTES`, `0` = off)
-- `scripts/spotify.sh build|install|uninstall|status|logout` – librespot
-  Spotify Connect service (`scripts/device/rg351v-librespot.service`, event
-  hook `librespot-event.sh`); the `deck` player design is in `apps/deck/`
+- `scripts/spotify.sh build|install|uninstall|status|ctl|logout` – the
+  `deckd` Spotify Connect service (`apps/deckd`,
+  `scripts/device/rg351v-deckd.service`); the `deck` player design is in
+  `apps/deck/`
 - `scripts/lib/device.sh` – shared host/ssh/hostname-assert helpers
 - `.storage/` – git-ignored, for anything secret or machine-specific
 - PocketJS cost (2026-10-13, `hero` demo, 960x544 raster, headless): boot
@@ -184,7 +186,16 @@ Host rg351v
   `AUTOSLEEP_CONF=... autosleep.py --once` plus `echo +100 > wakealarm`. While
   it is installed the device suspends ~5 min after the last button press, so
   SSH from the Mac drops until the power key wakes it.
-- Spotify: librespot must be built with `with-libmdns`; without it discovery
+- Spotify (deckd): a fresh `cargo` resolve of librespot 0.8.0 picks a vergen
+  that fails to build, so `apps/deckd/Cargo.lock` is seeded from the
+  librespot-0.8.0 crate and builds use `--locked`. Default features pull
+  native-tls (OpenSSL 3, absent on the device): depend on `librespot-core`
+  with `default-features = false, features = ["rustls-tls-native-roots"]`.
+  The Spirc task is not `Send`, so it cannot be `tokio::spawn`ed. A weak
+  Wi-Fi link (-65..-85 dBm) can drop the dealer websocket; librespot then
+  reconnects in ~1 s as an idle device and the phone loses control, which is
+  what deckd's restore addresses.
+- Spotify (plain librespot): it must be built with `with-libmdns`; without it discovery
   is compiled out and it exits with "Credentials are required if discovery
   and oauth login are disabled". Audio is plain ALSA (no PulseAudio): the
   default device is a `dmix` shared with ES. Never `pkill -f <path>` over
