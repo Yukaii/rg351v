@@ -136,7 +136,8 @@ Host rg351v
   with a KMSDRM-enabled SDL3 swapped in; `scripts/device/gamelist-set.py`
   registers entries in an ES `gamelist.xml`
 - `apps/ptterm/` + `scripts/ports/ptterm/` – ptterm, a tiny SDL3 BBS terminal
-  (ssh to `bbsu@ptt.cc`; 80x24, Unifont bitmaps, gamepad). Generate its
+  (ssh to `bbsu@ptt.cc`; 80x24, Unifont bitmaps, gamepad, SELECT opens an
+  on-screen keyboard for account/password). Generate its
   assets with `apps/ptterm/tools/gen-assets.sh`, then
   `scripts/build-port.sh ptterm && scripts/deploy-port.sh ptterm`. Parser
   self-test: `apps/ptterm/tools/selftest.c` (replays captured BBS bytes).

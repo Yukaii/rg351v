@@ -475,6 +475,53 @@ static void draw_text(int row, const char *s, uint32_t fg, uint32_t bg) {
   for (; x < SCR_W; x += CW) blit_glyph(x, y, 0, 8, fg, bg, 0);
 }
 
+/* ---- on-screen keyboard (bottom 96 px) --------------------------------- */
+static const char *const OSK_ROWS[4] = {"1234567890-_./", "qwertyuiop@:!?",
+                                        "asdfghjkl;#$%&", "zxcvbnm,'\"()=+"};
+static const char *const OSK_SPECIAL[5] = {"SHIFT", "SPACE", "BKSP", "ENTER", "CLOSE"};
+enum { OSK_COLS = 14, OSK_KEY_W = 40, OSK_SPECIAL_W = 112 };
+static int osk_open, osk_r, osk_c, osk_shift;
+
+static int osk_row_len(int r) { return r < 4 ? OSK_COLS : 5; }
+
+static void osk_move(int dr, int dc) {
+  osk_r = (osk_r + dr + 5) % 5;
+  int len = osk_row_len(osk_r);
+  if (osk_c >= len) osk_c = len - 1;
+  osk_c = (osk_c + dc + len) % len;
+}
+
+static void box_text(int x, int y, int w, const char *label, uint32_t fg, uint32_t bg) {
+  for (int row = 0; row < CH; row++)
+    for (int px = 0; px < w; px++) fb[(y + row) * SCR_W + x + px] = bg;
+  int tx = x + (w - (int)strlen(label) * CW) / 2;
+  for (; *label; label++, tx += CW) blit_glyph(tx, y, (uint8_t)*label, 8, fg, bg, 0);
+}
+
+static void osk_draw(void) {
+  for (int r = 0; r < 5; r++) {
+    int y = TERM_H + (1 + r) * CH;
+    int n = osk_row_len(r);
+    int kw = r < 4 ? OSK_KEY_W : OSK_SPECIAL_W;
+    int x = (SCR_W - n * kw) / 2;
+    for (int c = 0; c < n; c++) {
+      char label[8];
+      if (r < 4) {
+        char ch = OSK_ROWS[r][c];
+        if (osk_shift && ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
+        label[0] = ch;
+        label[1] = 0;
+      } else {
+        snprintf(label, sizeof label, "%s", OSK_SPECIAL[c]);
+        if (c == 0 && osk_shift) snprintf(label, sizeof label, "shift*");
+      }
+      int sel = (r == osk_r && c == osk_c);
+      box_text(x + c * kw, y, kw, label, sel ? 0xFF000000 : 0xFFFFFFFF,
+               sel ? 0xFF55FFFF : 0xFF202020);
+    }
+  }
+}
+
 /* ---- pty / ssh -------------------------------------------------------- */
 static int pty_fd = -1;
 static pid_t child = -1;
@@ -510,6 +557,25 @@ static void send_str(const char *s) {
     ssize_t n = write(pty_fd, s, strlen(s));
     (void)n;
   }
+}
+
+/* Press the selected on-screen key. Returns 1 if the keyboard should close. */
+static int osk_press(void) {
+  if (osk_r < 4) {
+    char ch = OSK_ROWS[osk_r][osk_c];
+    if (osk_shift && ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
+    char one[2] = {ch, 0};
+    send_str(one);
+    return 0;
+  }
+  switch (osk_c) {
+  case 0: osk_shift = !osk_shift; break;
+  case 1: send_str(" "); break;
+  case 2: send_str("\x08"); break;
+  case 3: send_str("\r"); break;
+  default: return 1;
+  }
+  return 0;
 }
 
 static int screen_contains(const char *needle) {
@@ -627,6 +693,29 @@ int main(int argc, char **argv) {
           running = 0;
           break;
         }
+        if (b == SDL_GAMEPAD_BUTTON_BACK && alive) {
+          osk_open = !osk_open;
+          dirty = 1;
+          break;
+        }
+        if (osk_open && alive) {
+          dirty = 1;
+          switch (b) {
+          case SDL_GAMEPAD_BUTTON_DPAD_UP: osk_move(-1, 0); break;
+          case SDL_GAMEPAD_BUTTON_DPAD_DOWN: osk_move(1, 0); break;
+          case SDL_GAMEPAD_BUTTON_DPAD_LEFT: osk_move(0, -1); break;
+          case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: osk_move(0, 1); break;
+          case SDL_GAMEPAD_BUTTON_SOUTH:
+            if (osk_press()) osk_open = 0;
+            break;
+          case SDL_GAMEPAD_BUTTON_EAST: send_str("\x08"); break; /* backspace */
+          case SDL_GAMEPAD_BUTTON_WEST: send_str(" "); break;
+          case SDL_GAMEPAD_BUTTON_NORTH: send_str("\r"); break;
+          case SDL_GAMEPAD_BUTTON_START: osk_open = 0; break;
+          default: break;
+          }
+          break;
+        }
         if (!alive) {
           if (b == SDL_GAMEPAD_BUTTON_SOUTH) {
             clear_rows(0, ROWS - 1);
@@ -713,8 +802,14 @@ int main(int argc, char **argv) {
       uint32_t hint = 0xFF55FFFF, dim = 0xFFAAAAAA, black = 0xFF000000;
       snprintf(status, sizeof status, "%s %s", alive ? "[connected]" : "[disconnected - A: reconnect]", target);
       draw_text(0, status, alive ? 0xFF55FF55 : 0xFFFF5555, black);
-      draw_text(1, "D-pad:move  A:Enter  B:Back  X:Space  Y:guest login", hint, black);
-      draw_text(2, "L1/R1:PageUp/PageDown  L2/R2:Top/End  SELECT+START:quit", dim, black);
+      if (osk_open && alive) {
+        osk_draw();
+      } else {
+        draw_text(1, "D-pad:move  A:Enter  B:Back  X:Space  Y:guest login", hint, black);
+        draw_text(2, "L1/R1:PageUp/PageDown  L2/R2:Top/End", dim, black);
+        draw_text(3, "SELECT:keyboard (type account/password)  SELECT+START:quit", dim, black);
+        for (int r = 4; r < 6; r++) draw_text(r, "", dim, black);
+      }
       SDL_UpdateTexture(tex, NULL, fb, SCR_W * 4);
       SDL_RenderClear(ren);
       SDL_RenderTexture(ren, tex, NULL, NULL);
