@@ -19,7 +19,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <sys/ioctl.h>
+#include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -605,7 +610,7 @@ static void load_account(void) {
 static int pty_fd = -1;
 static pid_t child = -1;
 
-static void start_session(const char *target, const char *known_hosts) {
+static void start_pty_session(const char *target, const char *known_hosts) {
   struct winsize ws = {ROWS, COLS, 0, 0};
   child = forkpty(&pty_fd, NULL, NULL, &ws);
   if (child == 0) {
@@ -618,7 +623,10 @@ static void start_session(const char *target, const char *known_hosts) {
   if (pty_fd >= 0) fcntl(pty_fd, F_SETFL, fcntl(pty_fd, F_GETFL) | O_NONBLOCK);
 }
 
+static int session_via_socket; /* 1: pty_fd is a socket to the session holder */
+
 static int session_alive(void) {
+  if (session_via_socket) return pty_fd >= 0;
   if (child <= 0) return 0;
   int st;
   pid_t r = waitpid(child, &st, WNOHANG);
@@ -629,6 +637,297 @@ static int session_alive(void) {
     return 0;
   }
   return 1;
+}
+
+/* ---- persistent session: detach / attach -------------------------------- */
+/* The first ptterm forks a background "holder" that owns the ssh pty and
+ * keeps its own copy of the screen model. The UI is a client on a Unix
+ * socket; leaving the app only closes the socket, and the next launch
+ * reattaches and gets the screen repainted from the holder's grid. */
+static int persist = 1;
+static int detach_secs = 30 * 60; /* holder exits after this long unattended */
+static char sock_path[160];
+static char *g_argv0;
+static uint16_t *b5_rev; /* Unicode -> Big5-UAO code (for big5 hosts) */
+
+typedef struct {
+  uint8_t *p;
+  size_t n, cap;
+} Buf;
+
+static void buf_put(Buf *b, const void *d, size_t n) {
+  if (b->n + n > b->cap) {
+    b->cap = (b->n + n) * 2 + 256;
+    b->p = realloc(b->p, b->cap);
+  }
+  memcpy(b->p + b->n, d, n);
+  b->n += n;
+}
+
+static void buf_fmt(Buf *b, const char *fmt, ...) {
+  char tmp[96];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(tmp, sizeof tmp, fmt, ap);
+  va_end(ap);
+  if (n > 0) buf_put(b, tmp, (size_t)n);
+}
+
+static void build_b5_rev(void) {
+  if (b5_rev) return;
+  b5_rev = calloc(65536, sizeof(uint16_t));
+  for (int l = 0; l < 126; l++)
+    for (int c = 0; c < 157; c++) {
+      uint16_t u = b5_table[l * 157 + c];
+      if (u && !b5_rev[u]) {
+        int trail = c < 63 ? 0x40 + c : 0xA1 + (c - 63);
+        b5_rev[u] = (uint16_t)(((0x81 + l) << 8) | trail);
+      }
+    }
+}
+
+static void snap_pen(Buf *b, uint8_t fg, uint8_t bg, uint8_t flags) {
+  buf_fmt(b, "\x1b[0%s%s%s%s;%d;%dm", (flags & F_BOLD) ? ";1" : "",
+          (flags & F_BLINK) ? ";5" : "", (flags & F_REV) ? ";7" : "",
+          (flags & F_UL) ? ";4" : "", fg < 8 ? 30 + fg : 90 + (fg - 8),
+          bg < 8 ? 40 + bg : 100 + (bg - 8));
+}
+
+/* An escape/text stream that, fed to a blank terminal, reproduces `grid`. */
+static void build_snapshot(Buf *b) {
+  if (!utf8_first) build_b5_rev();
+  buf_put(b, "\x1b[0m\x1b[2J", 8);
+  int lfg = -1, lbg = -1, lfl = -1;
+  for (int r = 0; r < ROWS; r++) {
+    buf_fmt(b, "\x1b[%d;1H", r + 1);
+    for (int c = 0; c < COLS; c++) {
+      Cell *x = &grid[r][c];
+      if (x->kind == 2) continue; /* trail half: the lead emits the char */
+      if (x->fg != lfg || x->bg != lbg || x->flags != lfl) {
+        snap_pen(b, x->fg, x->bg, x->flags);
+        lfg = x->fg;
+        lbg = x->bg;
+        lfl = x->flags;
+      }
+      uint16_t cp = x->cp;
+      if (cp == 0) {
+        buf_put(b, " ", 1);
+      } else if (cp < 0x80 && x->kind == 0) {
+        uint8_t ch = (uint8_t)cp;
+        buf_put(b, &ch, 1);
+      } else if (utf8_first) {
+        uint8_t u[3];
+        size_t n;
+        if (cp < 0x80) { u[0] = (uint8_t)cp; n = 1; }
+        else if (cp < 0x800) { u[0] = (uint8_t)(0xC0 | cp >> 6); u[1] = (uint8_t)(0x80 | (cp & 0x3F)); n = 2; }
+        else { u[0] = (uint8_t)(0xE0 | cp >> 12); u[1] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F)); u[2] = (uint8_t)(0x80 | (cp & 0x3F)); n = 3; }
+        buf_put(b, u, n);
+      } else {
+        uint16_t code = b5_rev[cp];
+        uint8_t two[2] = {(uint8_t)(code ? code >> 8 : '?'), (uint8_t)(code ? code & 0xFF : '?')};
+        buf_put(b, two, 2);
+      }
+    }
+  }
+  buf_fmt(b, "\x1b[%d;%dH", cur_r + 1, cur_c + 1);
+  snap_pen(b, cur_fg, cur_bg, cur_flags);
+}
+
+static void write_all(int fd, const uint8_t *p, size_t n) {
+  while (n > 0) {
+    ssize_t w = write(fd, p, n);
+    if (w > 0) {
+      p += w;
+      n -= (size_t)w;
+    } else if (w < 0 && errno == EAGAIN) {
+      struct pollfd pf = {fd, POLLOUT, 0};
+      if (poll(&pf, 1, 1000) <= 0) return;
+    } else {
+      return;
+    }
+  }
+}
+
+static double mono_s(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
+}
+
+static void set_nonblock(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK); }
+
+/* Background process: owns ssh, mirrors the screen, serves one client. */
+static void holder_run(int lfd, const char *target, const char *known_hosts) {
+  for (int fd = 3; fd < 256; fd++)
+    if (fd != lfd) close(fd); /* drop inherited DRM/SDL descriptors */
+  int nul = open("/dev/null", O_RDWR);
+  if (nul >= 0) {
+    dup2(nul, 0);
+    dup2(nul, 1);
+    dup2(nul, 2);
+  }
+  signal(SIGPIPE, SIG_IGN);
+  signal(SIGHUP, SIG_IGN);
+  signal(SIGINT, SIG_IGN);
+  signal(SIGTERM, SIG_DFL);
+  /* Readable in `ps`. (BusyBox killall also matches /proc/PID/exe, so the
+   * rename does not hide us from it; the launcher's exit combo signals the
+   * UI via /tmp/ptterm-ui.pid instead of killing by name.) */
+  prctl(PR_SET_NAME, "ptsess", 0, 0, 0);
+  if (g_argv0 && strlen(g_argv0) >= 6) {
+    size_t n = strlen(g_argv0);
+    memset(g_argv0, 0, n);
+    memcpy(g_argv0, "ptsess", 6);
+  }
+
+  clear_rows(0, ROWS - 1);
+  cur_r = cur_c = 0;
+  cur_fg = 7;
+  cur_bg = 0;
+  cur_flags = 0;
+  pstate = S_NORM;
+  mb_len = 0;
+  start_pty_session(target, known_hosts);
+  if (pty_fd < 0) _exit(1);
+
+  int client = -1, attach_pending = 0;
+  double idle_since = mono_s();
+  for (;;) {
+    struct pollfd p[3];
+    int np = 0;
+    p[np++] = (struct pollfd){pty_fd, POLLIN, 0};
+    p[np++] = (struct pollfd){lfd, POLLIN, 0};
+    if (client >= 0) p[np++] = (struct pollfd){client, POLLIN, 0};
+    poll(p, (nfds_t)np, 5000);
+
+    uint8_t buf[4096];
+    int pty_dead = 0;
+    if (p[0].revents & (POLLIN | POLLHUP | POLLERR)) {
+      ssize_t n;
+      while ((n = read(pty_fd, buf, sizeof buf)) > 0) {
+        for (ssize_t i = 0; i < n; i++) feed_byte(buf[i]);
+        if (client >= 0 && !attach_pending) write_all(client, buf, (size_t)n);
+      }
+      if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) pty_dead = 1;
+    }
+    if (p[1].revents & POLLIN) {
+      int c = accept(lfd, NULL, NULL);
+      if (c >= 0) {
+        if (client >= 0) close(client); /* newest client wins */
+        client = c;
+        set_nonblock(client);
+        attach_pending = 1;
+      }
+    }
+    if (client >= 0 && np == 3 && (p[2].revents & (POLLIN | POLLHUP))) {
+      ssize_t n = read(client, buf, sizeof buf);
+      if (n > 0) {
+        write_all(pty_fd, buf, (size_t)n);
+      } else if (n == 0 || (errno != EAGAIN && errno != EINTR)) {
+        close(client);
+        client = -1;
+        attach_pending = 0;
+        idle_since = mono_s();
+      }
+    }
+    /* Repaint once the parser is between sequences, so the client's
+     * fresh parser does not start in the middle of an escape. */
+    if (client >= 0 && attach_pending && pstate == S_NORM && mb_len == 0) {
+      Buf b = {0};
+      build_snapshot(&b);
+      write_all(client, b.p, b.n);
+      free(b.p);
+      attach_pending = 0;
+    }
+    int st;
+    if (pty_dead || waitpid(child, &st, WNOHANG) == child) break;
+    if (client < 0 && mono_s() - idle_since > detach_secs) {
+      kill(child, SIGHUP);
+      break;
+    }
+  }
+  if (client >= 0) close(client);
+  unlink(sock_path);
+  _exit(0);
+}
+
+static void make_sock_path(const char *target) {
+  char clean[96];
+  size_t i = 0;
+  for (; target[i] && i < sizeof clean - 1; i++) {
+    char c = target[i];
+    clean[i] = ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) ? c : '_';
+  }
+  clean[i] = 0;
+  snprintf(sock_path, sizeof sock_path, "/tmp/ptterm-%s.sock", clean);
+}
+
+static int unix_addr(struct sockaddr_un *a) {
+  memset(a, 0, sizeof *a);
+  a->sun_family = AF_UNIX;
+  if (strlen(sock_path) >= sizeof a->sun_path) return -1;
+  strcpy(a->sun_path, sock_path);
+  return 0;
+}
+
+static int unix_connect(void) {
+  struct sockaddr_un a;
+  if (unix_addr(&a) != 0) return -1;
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) return -1;
+  if (connect(fd, (struct sockaddr *)&a, sizeof a) != 0) {
+    close(fd);
+    return -1;
+  }
+  return fd;
+}
+
+static int spawn_holder(const char *target, const char *known_hosts) {
+  struct sockaddr_un a;
+  if (unix_addr(&a) != 0) return -1;
+  unlink(sock_path); /* stale socket from a dead holder */
+  int lfd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (lfd < 0) return -1;
+  if (bind(lfd, (struct sockaddr *)&a, sizeof a) != 0 || listen(lfd, 2) != 0) {
+    close(lfd);
+    return -1;
+  }
+  chmod(sock_path, 0600);
+  pid_t p = fork();
+  if (p < 0) {
+    close(lfd);
+    return -1;
+  }
+  if (p == 0) {
+    setsid();
+    if (fork() != 0) _exit(0); /* double fork: reparent the holder to init */
+    holder_run(lfd, target, known_hosts); /* never returns */
+  }
+  close(lfd);
+  waitpid(p, NULL, 0);
+  return 0;
+}
+
+static void start_session(const char *target, const char *known_hosts) {
+  session_via_socket = 0;
+  if (persist) {
+    int fd = unix_connect();
+    if (fd < 0 && spawn_holder(target, known_hosts) == 0) {
+      for (int i = 0; i < 50 && fd < 0; i++) { /* holder listens already */
+        fd = unix_connect();
+        if (fd < 0) usleep(20000);
+      }
+    }
+    if (fd >= 0) {
+      set_nonblock(fd);
+      pty_fd = fd;
+      child = -1;
+      session_via_socket = 1;
+      return;
+    }
+    fprintf(stderr, "ptterm: persistent session unavailable, running directly\n");
+  }
+  start_pty_session(target, known_hosts);
 }
 
 static void send_str(const char *s) {
@@ -747,7 +1046,23 @@ int main(int argc, char **argv) {
   sigaction(SIGHUP, &sa, NULL);
   SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
 
+  g_argv0 = argv[0];
+  {
+    /* UI pid for the launcher's exit combo (the session holder never writes it). */
+    FILE *pf = fopen("/tmp/ptterm-ui.pid", "w");
+    if (pf) {
+      fprintf(pf, "%d\n", (int)getpid());
+      fclose(pf);
+    }
+  }
   const char *target = argc > 1 ? argv[1] : "bbsu@ptt.cc";
+  {
+    const char *pe = getenv("PTTERM_PERSIST");
+    if (pe && strcmp(pe, "0") == 0) persist = 0;
+    const char *dm = getenv("PTTERM_DETACH_MINUTES");
+    if (dm && atoi(dm) > 0) detach_secs = atoi(dm) * 60;
+    make_sock_path(target);
+  }
   /* bbsu@ serves UTF-8 text (with raw-Big5 art); plain bbs@ is pure Big5.
    * PTTERM_ENCODING=utf8|big5 overrides. */
   const char *enc = getenv("PTTERM_ENCODING");
@@ -805,6 +1120,10 @@ int main(int argc, char **argv) {
         ssize_t n;
         while ((n = read(pty_fd, buf, sizeof buf)) > 0)
           for (ssize_t i = 0; i < n; i++) feed_byte(buf[i]);
+        if (n == 0 && session_via_socket) { /* holder closed: ssh ended */
+          close(pty_fd);
+          pty_fd = -1;
+        }
       }
     } else {
       SDL_Delay(25);
@@ -949,8 +1268,8 @@ int main(int argc, char **argv) {
       blink_dirty = 0;
       render(blink_on, alive, full);
       if (full) {
-        draw_hint(alive ? (acct_loaded ? "A:Enter B:Back X:Space Y:Login L1/R1:Pg L2/R2:Top/End SEL:Keys SEL+START:Quit"
-                                       : "A:Enter B:Back X:Space Y:Guest L1/R1:Pg L2/R2:Top/End SEL:Keys SEL+START:Quit")
+        draw_hint(alive ? (acct_loaded ? "A:Enter B:Back X:Space Y:Login L1/R1:Pg L2/R2:Top/End SEL:Keys SEL+START:Leave"
+                                       : "A:Enter B:Back X:Space Y:Guest L1/R1:Pg L2/R2:Top/End SEL:Keys SEL+START:Leave")
                         : "Disconnected - A:Reconnect  SEL+START:Quit",
                   alive);
         dirty_y0 = 0;
@@ -996,10 +1315,12 @@ int main(int argc, char **argv) {
       fclose(f);
     }
   }
-  if (child > 0) {
+  if (child > 0) { /* direct (non-persistent) session: end ssh with us */
     kill(child, SIGTERM);
     waitpid(child, NULL, 0);
   }
+  if (pty_fd >= 0) close(pty_fd); /* persistent session: just detach */
+  unlink("/tmp/ptterm-ui.pid");
   SDL_Quit();
   return 0;
 }

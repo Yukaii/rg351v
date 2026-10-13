@@ -207,3 +207,17 @@ Host rg351v
   repeated; chosen by measuring isolated ink per row over all 60k glyphs) plus
   a single 24 px hint line. The on-screen keyboard overlays the half of the
   screen opposite the cursor. UI text uses native 16 px glyph rows.
+- ptterm sessions persist across leaving the app: the first launch forks a
+  background holder (`ptsess` in `ps`, listening on `/tmp/ptterm-<target>.sock`)
+  that owns `ssh` and mirrors the 80x24 grid; the UI is a client. Leaving
+  (SELECT+START, or the L2+SELECT+START combo) only detaches; relaunching
+  repaints the exact screen and the same BBS session (same ssh pid) resumes.
+  The holder exits when ssh ends (BBS logout `g`), after
+  `PTTERM_DETACH_MINUTES` (default 30) unattended, or on reboot (/tmp).
+  `PTTERM_PERSIST=0` runs the old direct mode.
+- Do not `killall ptterm`: BusyBox matches `/proc/PID/exe`, so the holder
+  matches too (renaming comm/argv0 does not help). The launcher's exit combo
+  signals only the UI via `/tmp/ptterm-ui.pid`. `jslisten` runs its command
+  string through `system()`, so shell syntax works in `jslisten set`.
+- Security: while detached the holder stays logged in as your PTT account for
+  up to the detach timeout; anyone who launches PTT reattaches to it.

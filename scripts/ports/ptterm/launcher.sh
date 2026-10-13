@@ -13,8 +13,14 @@ init_port ${PORT} alsa
 
 clear >/dev/console
 
-# Hold L2+SELECT+START to kill the port (SELECT+START also quits it).
-jslisten set "/usr/bin/killall ${PORT}"
+# Hold L2+SELECT+START to leave. ptterm keeps the BBS session alive in a
+# background holder that is also named ptterm to BusyBox, so `killall` would
+# end the session too: signal only the UI process (SIGTERM = detach).
+cat >/tmp/ptterm-kill.sh <<'KILL'
+p=$(cat /tmp/ptterm-ui.pid 2>/dev/null)
+case "$(readlink /proc/$p/exe 2>/dev/null)" in */ptterm) kill -TERM "$p" ;; esac
+KILL
+jslisten set "/bin/sh /tmp/ptterm-kill.sh"
 
 cd /storage/roms/homebrew/ptterm || exit 1
 
