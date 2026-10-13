@@ -1,0 +1,12 @@
+[Unit]
+Description=Suspend the handheld after a period without input
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u /storage/.config/rg351v/autosleep.py
+Restart=always
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
