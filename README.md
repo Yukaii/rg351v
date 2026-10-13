@@ -131,6 +131,10 @@ Host rg351v
   from the Mac
 - `scripts/tune.sh get|set|preset` – CPU/GPU/DRAM governors and clocks, core
   count, backlight, timed screen-off (sysfs, resets on reboot)
+- `scripts/deploy-koreader.sh` (+ `scripts/ports/koreader/`,
+  `scripts/ports/sdl3-kmsdrm/`) – install KOReader under the Homebrew menu
+  with a KMSDRM-enabled SDL3 swapped in; `scripts/device/gamelist-set.py`
+  registers entries in an ES `gamelist.xml`
 - `scripts/lib/device.sh` – shared host/ssh/hostname-assert helpers
 - `.storage/` – git-ignored, for anything secret or machine-specific
 - Sleep: the power key runs a real kernel suspend (`mem`, logind
@@ -160,3 +164,12 @@ Host rg351v
   WFI. 1008 MHz is the lowest OPP (no lower clock exists in the kernel).
   Backlight off saves only ~21 mA at brightness 24. Wi-Fi power save is not
   supported by the mt7601u driver (`-95`).
+- Homebrew menu = `/storage/roms/homebrew`: a top-level `<Name>.sh` launcher,
+  a sibling app folder, and a `gamelist.xml` entry (stop `emustation` before
+  editing the gamelist: ES rewrites it on quit). Ports = `/storage/roms/ports`.
+- `/storage/roms` is exFAT: no symlinks, ownership or permission bits.
+  rsync there needs `-rLt --no-perms --no-owner --no-group`, and `--delete`
+  must exclude user data dirs.
+- Prebuilt SDL3 apps (KOReader) bundle an SDL3 without KMSDRM; swap in
+  `scripts/build-port.sh sdl3-kmsdrm` at the same release. glibc 2.36 and
+  libstdc++ GLIBCXX 3.4.30 are the device's ceilings.
