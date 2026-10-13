@@ -20,6 +20,8 @@ cd /storage/roms/homebrew/ptterm || exit 1
 
 # Pin KMSDRM: SDL3's default driver pick is unreliable without X11/Wayland.
 export SDL_VIDEODRIVER=kmsdrm
+# Per-phase timing summary is appended to the log on exit (negligible cost).
+export PTTERM_PROF=1
 
 ./${PORT} &>/tmp/logs/ptterm.log
 ret_error=$?

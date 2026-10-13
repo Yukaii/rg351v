@@ -21,6 +21,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define COLS 80
@@ -416,34 +417,60 @@ static const uint32_t PAL[16] = {
 
 static uint32_t fb[SCR_W * SCR_H];
 
-/* Draws one glyph into a (cell_w x 16) box. Narrow glyphs in wide boxes are
+/* Draws one glyph into a (box_w x 16) box. Narrow glyphs in wide boxes are
  * doubled horizontally so BBS block art stays connected. */
+static uint16_t dbl8[256]; /* 8 bits -> 16 bits, each bit doubled */
+
+static void init_tables(void) {
+  for (int v = 0; v < 256; v++) {
+    uint16_t o = 0;
+    for (int b = 0; b < 8; b++)
+      if (v & (1 << b)) o |= (uint16_t)(3u << (2 * b));
+    dbl8[v] = o;
+  }
+}
+
 static void blit_glyph(int x, int y, uint16_t cp, int box_w, uint32_t fg, uint32_t bg, int ul) {
   uint32_t ent = cp ? uf_index[cp] : 0;
   const uint8_t *g = ent ? uf_blob + ((ent & 0x7FFFFFFF) - 1) : NULL;
   int gw = (ent & 0x80000000u) ? 16 : 8;
+  uint32_t full = (1u << box_w) - 1;
   for (int row = 0; row < CH; row++) {
-    uint32_t *dst = &fb[(y + row) * SCR_W + x];
-    for (int px = 0; px < box_w; px++) {
-      int on = 0;
-      if (g) {
-        int sx = (box_w == 16 && gw == 8) ? px / 2 : px;
-        if (sx < gw) {
-          uint8_t byte = g[row * (gw / 8) + sx / 8];
-          on = (byte >> (7 - (sx % 8))) & 1;
-        }
-      } else if (cp > 0x7F && box_w == 16) {
-        /* missing glyph: hollow box */
-        on = (row == 1 || row == 14 || px == 1 || px == 14) && row > 0 && row < 15;
-      }
-      if (ul && row == CH - 1) on = 1;
-      dst[px] = on ? fg : bg;
+    uint32_t bits = 0;
+    if (g) {
+      uint32_t gb = gw == 16 ? (uint32_t)(g[row * 2] << 8 | g[row * 2 + 1]) : g[row];
+      if (box_w == 16 && gw == 8)
+        bits = dbl8[gb];
+      else if (box_w == 8 && gw == 16)
+        bits = gb >> 8; /* clipped to the left half */
+      else
+        bits = gb;
+    } else if (cp > 0x7F && box_w == 16) {
+      /* missing glyph: hollow box */
+      bits = (row == 1 || row == 14) ? 0x7FFE : ((row > 1 && row < 14) ? 0x4002 : 0);
     }
+    if (ul && row == CH - 1) bits = full;
+    uint32_t *dst = &fb[(y + row) * SCR_W + x];
+    for (int px = 0; px < box_w; px++) dst[px] = ((bits >> (box_w - 1 - px)) & 1) ? fg : bg;
   }
 }
 
-static void render(int blink_on, int show_cursor) {
+static int row_has_blink(int r) {
+  for (int c = 0; c < COLS; c++)
+    if (grid[r][c].flags & F_BLINK) return 1;
+  return 0;
+}
+
+static int dirty_y0, dirty_y1; /* pixel rows touched by the last render() */
+
+/* full=0: only the cursor row and rows with blinking cells (blink-only frame) */
+static void render(int blink_on, int show_cursor, int full) {
+  dirty_y0 = SCR_H;
+  dirty_y1 = 0;
   for (int r = 0; r < ROWS; r++) {
+    if (!full && r != cur_r && !row_has_blink(r)) continue;
+    if (r * CH < dirty_y0) dirty_y0 = r * CH;
+    if ((r + 1) * CH > dirty_y1) dirty_y1 = (r + 1) * CH;
     for (int c = 0; c < COLS; c++) {
       Cell *cell = &grid[r][c];
       if (cell->kind == 2) continue; /* drawn with its lead */
@@ -522,6 +549,28 @@ static void osk_draw(void) {
   }
 }
 
+/* ---- saved login ------------------------------------------------------ */
+/* /storage/.config/ptterm/account: line 1 = ID, line 2 = password. Lives on
+ * the ext4 /storage (root-only, not shared over SMB), never under roms. */
+static char acct_user[64], acct_pass[96];
+static int acct_loaded;
+static char macro_buf[128];
+static uint64_t macro_at;
+static int macro_pending;
+
+static void load_account(void) {
+  const char *path = getenv("PTTERM_ACCOUNT");
+  if (!path) path = "/storage/.config/ptterm/account";
+  FILE *f = fopen(path, "r");
+  if (!f) return;
+  if (fgets(acct_user, sizeof acct_user, f) && fgets(acct_pass, sizeof acct_pass, f)) {
+    acct_user[strcspn(acct_user, "\r\n")] = 0;
+    acct_pass[strcspn(acct_pass, "\r\n")] = 0;
+    acct_loaded = acct_user[0] != 0;
+  }
+  fclose(f);
+}
+
 /* ---- pty / ssh -------------------------------------------------------- */
 static int pty_fd = -1;
 static pid_t child = -1;
@@ -593,6 +642,19 @@ static int screen_contains(const char *needle) {
   return 0;
 }
 
+/* Types the saved ID now and the password shortly after (PTT must have shown
+ * its password prompt first). Only acts on the login screen. */
+static int account_login(uint64_t now) {
+  if (!acct_loaded || macro_pending || !screen_contains("guest")) return 0;
+  char line[96];
+  snprintf(line, sizeof line, "%s\r", acct_user);
+  send_str(line);
+  snprintf(macro_buf, sizeof macro_buf, "%s\r", acct_pass);
+  macro_at = now + 800;
+  macro_pending = 1;
+  return 1;
+}
+
 /* ---- input ------------------------------------------------------------ */
 typedef struct {
   const char *seq;
@@ -626,7 +688,35 @@ static const char *button_seq(SDL_GamepadButton b, int *repeating) {
   }
 }
 
+/* PTTERM_PROF=1: accumulate wall time per loop phase, print on exit. */
+static double prof_ms[4];
+static const char *const PROF_NAMES[4] = {"poll(pty)", "SDL_PollEvent", "render+present", "other"};
+static int prof_on;
+static double mono_ms(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
+}
+#define PROF_BEGIN(v) double v = prof_on ? mono_ms() : 0
+#define PROF_END(v, i) do { if (prof_on) prof_ms[i] += mono_ms() - v; } while (0)
+
+static volatile sig_atomic_t quit_flag;
+static void on_signal(int sig) {
+  (void)sig;
+  quit_flag = 1;
+}
+
 int main(int argc, char **argv) {
+  /* Handle our own termination (killall from the exit combo) so ssh is
+   * reaped and the terminal state is torn down cleanly. */
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = on_signal;
+  sigaction(SIGTERM, &sa, NULL);
+  sigaction(SIGINT, &sa, NULL);
+  sigaction(SIGHUP, &sa, NULL);
+  SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+
   const char *target = argc > 1 ? argv[1] : "bbsu@ptt.cc";
   /* bbsu@ serves UTF-8 text (with raw-Big5 art); plain bbs@ is pure Big5.
    * PTTERM_ENCODING=utf8|big5 overrides. */
@@ -640,6 +730,7 @@ int main(int argc, char **argv) {
   const char *base = SDL_GetBasePath();
   if (!base) base = "./";
   if (load_assets(base) != 0) return 1;
+  init_tables();
 
   char kh[1100];
   snprintf(kh, sizeof kh, "UserKnownHostsFile=%sknown_hosts", base);
@@ -659,14 +750,21 @@ int main(int argc, char **argv) {
 
   clear_rows(0, ROWS - 1);
   for (int i = 0; i < SCR_W * SCR_H; i++) fb[i] = 0xFF000000;
+  load_account();
+  prof_on = getenv("PTTERM_PROF") != NULL;
+  const double prof_t0 = mono_ms();
   start_session(target, kh);
+  const uint64_t t_start = SDL_GetTicks();
+  int autologin_done = !getenv("PTTERM_AUTOLOGIN");
 
   uint64_t last_blink = 0, last_draw = 0;
   int blink_on = 1, running = 1, select_held = 0, start_held = 0;
+  int blink_dirty = 0, prev_alive = -1;
   char status[96];
 
-  while (running) {
+  while (running && !quit_flag) {
     /* pty -> screen */
+    PROF_BEGIN(t_poll);
     if (pty_fd >= 0) {
       struct pollfd p = {pty_fd, POLLIN, 0};
       if (poll(&p, 1, 25) > 0) {
@@ -678,8 +776,10 @@ int main(int argc, char **argv) {
     } else {
       SDL_Delay(25);
     }
+    PROF_END(t_poll, 0);
     int alive = session_alive();
 
+    PROF_BEGIN(t_ev);
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
       switch (e.type) {
@@ -724,8 +824,9 @@ int main(int argc, char **argv) {
           }
           break;
         }
-        if (b == SDL_GAMEPAD_BUTTON_NORTH) { /* Y: guest login macro */
-          if (screen_contains("guest")) send_str("guest\r");
+        if (b == SDL_GAMEPAD_BUTTON_NORTH) { /* Y: saved login, else guest */
+          if (!account_login(SDL_GetTicks()) && !acct_loaded && screen_contains("guest"))
+            send_str("guest\r");
           break;
         }
         int repeating;
@@ -785,38 +886,89 @@ int main(int argc, char **argv) {
       }
     }
 
+    PROF_END(t_ev, 1);
     uint64_t now = SDL_GetTicks();
+    if (macro_pending && now >= macro_at && alive) {
+      send_str(macro_buf);
+      memset(macro_buf, 0, sizeof macro_buf);
+      macro_pending = 0;
+    }
+    if (!autologin_done && alive && now - t_start > 2000 && account_login(now))
+      autologin_done = 1;
     if (rep.active && now >= rep.next && alive) {
       send_str(rep.seq);
       rep.next = now + 70;
     }
+    if (alive != prev_alive) {
+      prev_alive = alive;
+      dirty = 1;
+    }
     if (now - last_blink >= 500) {
       last_blink = now;
       blink_on = !blink_on;
-      dirty = 1;
+      blink_dirty = 1;
     }
-    if (dirty && now - last_draw >= 33) {
+    if ((dirty || blink_dirty) && now - last_draw >= 33) {
+      PROF_BEGIN(t_r);
       last_draw = now;
+      int full = dirty;
       dirty = 0;
-      render(blink_on, alive);
-      uint32_t hint = 0xFF55FFFF, dim = 0xFFAAAAAA, black = 0xFF000000;
-      snprintf(status, sizeof status, "%s %s", alive ? "[connected]" : "[disconnected - A: reconnect]", target);
-      draw_text(0, status, alive ? 0xFF55FF55 : 0xFFFF5555, black);
-      if (osk_open && alive) {
-        osk_draw();
-      } else {
-        draw_text(1, "D-pad:move  A:Enter  B:Back  X:Space  Y:guest login", hint, black);
-        draw_text(2, "L1/R1:PageUp/PageDown  L2/R2:Top/End", dim, black);
-        draw_text(3, "SELECT:keyboard (type account/password)  SELECT+START:quit", dim, black);
-        for (int r = 4; r < 6; r++) draw_text(r, "", dim, black);
+      blink_dirty = 0;
+      render(blink_on, alive, full);
+      if (full) {
+        uint32_t hint = 0xFF55FFFF, dim = 0xFFAAAAAA, black = 0xFF000000;
+        snprintf(status, sizeof status, "%s %s",
+                 alive ? "[connected]" : "[disconnected - A: reconnect]", target);
+        draw_text(0, status, alive ? 0xFF55FF55 : 0xFFFF5555, black);
+        if (osk_open && alive) {
+          osk_draw();
+        } else {
+          draw_text(1, acct_loaded
+                           ? "D-pad:move  A:Enter  B:Back  X:Space  Y:saved login"
+                           : "D-pad:move  A:Enter  B:Back  X:Space  Y:guest login",
+                    hint, black);
+          draw_text(2, "L1/R1:PageUp/PageDown  L2/R2:Top/End", dim, black);
+          draw_text(3, "SELECT:keyboard (type account/password)  SELECT+START:quit", dim, black);
+          for (int r = 4; r < 6; r++) draw_text(r, "", dim, black);
+        }
+        dirty_y0 = 0;
+        dirty_y1 = SCR_H;
       }
-      SDL_UpdateTexture(tex, NULL, fb, SCR_W * 4);
+      if (dirty_y1 > dirty_y0) {
+        SDL_Rect rr = {0, dirty_y0, SCR_W, dirty_y1 - dirty_y0};
+        SDL_UpdateTexture(tex, &rr, fb + (size_t)dirty_y0 * SCR_W, SCR_W * 4);
+      }
       SDL_RenderClear(ren);
       SDL_RenderTexture(ren, tex, NULL, NULL);
       SDL_RenderPresent(ren);
+      PROF_END(t_r, 2);
     }
   }
 
+  if (prof_on) {
+    double total = mono_ms() - prof_t0;
+    fprintf(stderr, "ptterm profile over %.1f s:\n", total / 1000);
+    for (int i = 0; i < 3; i++)
+      fprintf(stderr, "  %-16s %8.1f ms  (%.1f%%)\n", PROF_NAMES[i], prof_ms[i], 100 * prof_ms[i] / total);
+  }
+  const char *dump = getenv("PTTERM_DUMP");
+  if (dump) {
+    FILE *f = fopen(dump, "w");
+    if (f) {
+      for (int r = 0; r < ROWS; r++) {
+        for (int c = 0; c < COLS; c++) {
+          Cell *x = &grid[r][c];
+          if (x->kind == 2) continue;
+          uint16_t cp = x->cp ? x->cp : ' ';
+          if (cp < 0x80) fputc(cp, f);
+          else if (cp < 0x800) { fputc(0xC0 | cp >> 6, f); fputc(0x80 | (cp & 0x3F), f); }
+          else { fputc(0xE0 | cp >> 12, f); fputc(0x80 | ((cp >> 6) & 0x3F), f); fputc(0x80 | (cp & 0x3F), f); }
+        }
+        fputc('\n', f);
+      }
+      fclose(f);
+    }
+  }
   if (child > 0) {
     kill(child, SIGTERM);
     waitpid(child, NULL, 0);

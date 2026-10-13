@@ -141,6 +141,9 @@ Host rg351v
   assets with `apps/ptterm/tools/gen-assets.sh`, then
   `scripts/build-port.sh ptterm && scripts/deploy-port.sh ptterm`. Parser
   self-test: `apps/ptterm/tools/selftest.c` (replays captured BBS bytes).
+- `scripts/ptt-account.sh set|status|clear` – save the PTT ID/password that
+  ptterm's Y button types on the login screen, to
+  `/storage/.config/ptterm/account` (ext4, mode 600, not shared over SMB)
 - `scripts/lib/device.sh` – shared host/ssh/hostname-assert helpers
 - `.storage/` – git-ignored, for anything secret or machine-specific
 - Sleep: the power key runs a real kernel suspend (`mem`, logind
@@ -187,3 +190,12 @@ Host rg351v
 - Ghostty is not an option here: it needs GTK4 and OpenGL, and the device has
   no X11/Wayland or desktop GL (Mali-G31, GLES only). Anything graphical must
   draw through SDL/KMSDRM.
+- SMB: the `roms`, `update` and `logs` shares are `public = yes` with
+  `guest account = root`, i.e. anyone on the LAN can read AND write
+  `/storage/roms` as root without a password (incl. launcher `.sh` files).
+  `/storage` itself is not shared; keep secrets there, never under roms.
+- ptterm env knobs: `PTTERM_ENCODING=utf8|big5`, `PTTERM_ACCOUNT=<file>`,
+  `PTTERM_AUTOLOGIN=1`, `PTTERM_DUMP=<file>` (screen text on exit),
+  `PTTERM_PROF=1` (per-phase timing on exit; the launcher enables it, output
+  lands in /tmp/logs/ptterm.log). SDL's `offscreen` driver uses a slow
+  software renderer, so headless CPU numbers overstate the real KMSDRM cost.
