@@ -203,3 +203,7 @@ Host rg351v
 - ptterm real-session cost (KMSDRM/GLES): ~1% of one core, battery draw equals
   the ~440 mA idle floor. Foreground palette is lifted (>= 5:1 contrast on
   black) while backgrounds stay dark, because PTT puts white text on blue bars.
+- ptterm layout: 24 rows x 19 px (Unifont's 16 glyph rows with rows 0, 7 and 12
+  repeated; chosen by measuring isolated ink per row over all 60k glyphs) plus
+  a single 24 px hint line. The on-screen keyboard overlays the half of the
+  screen opposite the cursor. UI text uses native 16 px glyph rows.

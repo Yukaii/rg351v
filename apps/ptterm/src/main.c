@@ -27,10 +27,12 @@
 #define COLS 80
 #define ROWS 24
 #define CW 8
-#define CH 16
+#define CH 16 /* glyph bitmap height */
+#define CELL_H 19 /* on-screen cell height: 3 glyph rows are repeated (ROW_MAP) */
 #define SCR_W (COLS * CW) /* 640 */
 #define SCR_H 480
-#define TERM_H (ROWS * CH) /* 384 */
+#define TERM_H (ROWS * CELL_H) /* 456 */
+#define HINT_H (SCR_H - TERM_H) /* 24: one hint line */
 
 enum { F_BOLD = 1, F_BLINK = 2, F_REV = 4, F_UL = 8 };
 
@@ -439,12 +441,22 @@ static void init_tables(void) {
   }
 }
 
-static void blit_glyph(int x, int y, uint16_t cp, int box_w, uint32_t fg, uint32_t bg, int ul) {
+/* 16 glyph rows stretched to 19 by repeating rows 0, 7 and 12: those carry the
+ * least isolated ink across Unifont (a repeated row thickens strokes that sit
+ * alone on it), and repeating full rows keeps box/block art connected. */
+static const uint8_t ROW_MAP[CELL_H] = {0, 0, 1, 2, 3, 4, 5, 6, 7, 7,
+                                        8, 9, 10, 11, 12, 12, 13, 14, 15};
+
+/* tall=1: CELL_H rows (terminal cells); tall=0: native CH rows (UI text). */
+static void blit_glyph(int x, int y, uint16_t cp, int box_w, uint32_t fg, uint32_t bg, int ul,
+                       int tall) {
   uint32_t ent = cp ? uf_index[cp] : 0;
   const uint8_t *g = ent ? uf_blob + ((ent & 0x7FFFFFFF) - 1) : NULL;
   int gw = (ent & 0x80000000u) ? 16 : 8;
   uint32_t full = (1u << box_w) - 1;
-  for (int row = 0; row < CH; row++) {
+  int rows = tall ? CELL_H : CH;
+  for (int orow = 0; orow < rows; orow++) {
+    int row = tall ? ROW_MAP[orow] : orow;
     uint32_t bits = 0;
     if (g) {
       uint32_t gb = gw == 16 ? (uint32_t)(g[row * 2] << 8 | g[row * 2 + 1]) : g[row];
@@ -458,8 +470,8 @@ static void blit_glyph(int x, int y, uint16_t cp, int box_w, uint32_t fg, uint32
       /* missing glyph: hollow box */
       bits = (row == 1 || row == 14) ? 0x7FFE : ((row > 1 && row < 14) ? 0x4002 : 0);
     }
-    if (ul && row == CH - 1) bits = full;
-    uint32_t *dst = &fb[(y + row) * SCR_W + x];
+    if (ul && orow == rows - 1) bits = full;
+    uint32_t *dst = &fb[(y + orow) * SCR_W + x];
     for (int px = 0; px < box_w; px++) dst[px] = ((bits >> (box_w - 1 - px)) & 1) ? fg : bg;
   }
 }
@@ -478,8 +490,8 @@ static void render(int blink_on, int show_cursor, int full) {
   dirty_y1 = 0;
   for (int r = 0; r < ROWS; r++) {
     if (!full && r != cur_r && !row_has_blink(r)) continue;
-    if (r * CH < dirty_y0) dirty_y0 = r * CH;
-    if ((r + 1) * CH > dirty_y1) dirty_y1 = (r + 1) * CH;
+    if (r * CELL_H < dirty_y0) dirty_y0 = r * CELL_H;
+    if ((r + 1) * CELL_H > dirty_y1) dirty_y1 = (r + 1) * CELL_H;
     for (int c = 0; c < COLS; c++) {
       Cell *cell = &grid[r][c];
       if (cell->kind == 2) continue; /* drawn with its lead */
@@ -498,20 +510,26 @@ static void render(int blink_on, int show_cursor, int full) {
         fg = bg;
         bg = t == bg ? 0xFFAAAAAA : t;
       }
-      blit_glyph(c * CW, r * CH, cp, cell->kind == 1 ? 16 : 8, fg, bg,
-                 (cell->flags & F_UL) != 0);
+      blit_glyph(c * CW, r * CELL_H, cp, cell->kind == 1 ? 16 : 8, fg, bg,
+                 (cell->flags & F_UL) != 0, 1);
     }
   }
 }
 
-static void draw_text(int row, const char *s, uint32_t fg, uint32_t bg) {
-  int y = TERM_H + row * CH, x = 0;
-  for (; *s && x < SCR_W; s++, x += CW)
-    blit_glyph(x, y, (uint8_t)*s, 8, fg, bg, 0);
-  for (; x < SCR_W; x += CW) blit_glyph(x, y, 0, 8, fg, bg, 0);
+/* The single hint line under the terminal: a connection dot, then text. */
+static void draw_hint(const char *text, int connected) {
+  for (int y = TERM_H; y < SCR_H; y++)
+    for (int x = 0; x < SCR_W; x++) fb[y * SCR_W + x] = 0xFF000000;
+  uint32_t dot = connected ? 0xFF55FF55 : 0xFFFF5555;
+  for (int y = 0; y < 6; y++)
+    for (int x = 0; x < 6; x++) fb[(TERM_H + (HINT_H - 6) / 2 + y) * SCR_W + 1 + x] = dot;
+  int ty = TERM_H + (HINT_H - CH) / 2;
+  int x = CW;
+  for (; *text && x < SCR_W; text++, x += CW)
+    blit_glyph(x, ty, (uint8_t)*text, 8, 0xFF55FFFF, 0xFF000000, 0, 0);
 }
 
-/* ---- on-screen keyboard (bottom 96 px) --------------------------------- */
+/* ---- on-screen keyboard (5 x 16 px overlay; top or bottom half) ---------- */
 static const char *const OSK_ROWS[4] = {"1234567890-_./", "qwertyuiop@:!?",
                                         "asdfghjkl;#$%&", "zxcvbnm,'\"()=+"};
 static const char *const OSK_SPECIAL[5] = {"SHIFT", "SPACE", "BKSP", "ENTER", "CLOSE"};
@@ -531,12 +549,15 @@ static void box_text(int x, int y, int w, const char *label, uint32_t fg, uint32
   for (int row = 0; row < CH; row++)
     for (int px = 0; px < w; px++) fb[(y + row) * SCR_W + x + px] = bg;
   int tx = x + (w - (int)strlen(label) * CW) / 2;
-  for (; *label; label++, tx += CW) blit_glyph(tx, y, (uint8_t)*label, 8, fg, bg, 0);
+  for (; *label; label++, tx += CW) blit_glyph(tx, y, (uint8_t)*label, 8, fg, bg, 0, 0);
 }
+
+/* Opposite half from the cursor, so the line being typed stays visible. */
+static int osk_y0(void) { return cur_r >= ROWS / 2 ? 0 : SCR_H - 5 * CH; }
 
 static void osk_draw(void) {
   for (int r = 0; r < 5; r++) {
-    int y = TERM_H + (1 + r) * CH;
+    int y = osk_y0() + r * CH;
     int n = osk_row_len(r);
     int kw = r < 4 ? OSK_KEY_W : OSK_SPECIAL_W;
     int x = (SCR_W - n * kw) / 2;
@@ -773,7 +794,6 @@ int main(int argc, char **argv) {
   uint64_t last_blink = 0, last_draw = 0;
   int blink_on = 1, running = 1, select_held = 0, start_held = 0;
   int blink_dirty = 0, prev_alive = -1;
-  char status[96];
 
   while (running && !quit_flag) {
     /* pty -> screen */
@@ -929,23 +949,17 @@ int main(int argc, char **argv) {
       blink_dirty = 0;
       render(blink_on, alive, full);
       if (full) {
-        uint32_t hint = 0xFF55FFFF, dim = 0xFFAAAAAA, black = 0xFF000000;
-        snprintf(status, sizeof status, "%s %s",
-                 alive ? "[connected]" : "[disconnected - A: reconnect]", target);
-        draw_text(0, status, alive ? 0xFF55FF55 : 0xFFFF5555, black);
-        if (osk_open && alive) {
-          osk_draw();
-        } else {
-          draw_text(1, acct_loaded
-                           ? "D-pad:move  A:Enter  B:Back  X:Space  Y:saved login"
-                           : "D-pad:move  A:Enter  B:Back  X:Space  Y:guest login",
-                    hint, black);
-          draw_text(2, "L1/R1:PageUp/PageDown  L2/R2:Top/End", dim, black);
-          draw_text(3, "SELECT:keyboard (type account/password)  SELECT+START:quit", dim, black);
-          for (int r = 4; r < 6; r++) draw_text(r, "", dim, black);
-        }
+        draw_hint(alive ? (acct_loaded ? "A:Enter B:Back X:Space Y:Login L1/R1:Pg L2/R2:Top/End SEL:Keys SEL+START:Quit"
+                                       : "A:Enter B:Back X:Space Y:Guest L1/R1:Pg L2/R2:Top/End SEL:Keys SEL+START:Quit")
+                        : "Disconnected - A:Reconnect  SEL+START:Quit",
+                  alive);
         dirty_y0 = 0;
         dirty_y1 = SCR_H;
+      }
+      if (osk_open && alive) {
+        osk_draw();
+        if (osk_y0() < dirty_y0) dirty_y0 = osk_y0();
+        if (osk_y0() + 5 * CH > dirty_y1) dirty_y1 = osk_y0() + 5 * CH;
       }
       if (dirty_y1 > dirty_y0) {
         SDL_Rect rr = {0, dirty_y0, SCR_W, dirty_y1 - dirty_y0};
