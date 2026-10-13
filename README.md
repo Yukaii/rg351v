@@ -15,9 +15,9 @@ Notes, scripts and tweaks for my Anbernic RG351V running AmberELEC.
 - [x] Save sync via `scripts/saves.sh` (`backup`/`restore` device↔Mac,
   `pull` RomM cloud saves onto the device, `push` a save file to RomM)
 - [x] Pikachu Volleyball (pikaball-revamped) built for aarch64 via
-  `scripts/build-pikaball.sh` (Rocky 9 + GCC 13, static SDL3, glibc 2.34)
+  `scripts/build-port.sh pikaball` (Rocky 9 + GCC 13, static SDL3, glibc 2.34)
 - [x] Deployed to `/storage/roms/ports/pikaball/` via
-  `scripts/deploy-pikaball.sh` (launcher + native gamepad, no gptokeyb needed)
+  `scripts/deploy-port.sh pikaball` (launcher + native gamepad, no gptokeyb needed)
 - [x] Controls/exit documented in the Ports gamelist entry (move: dpad/stick,
   hit: face buttons, START: pause, hold L2+SELECT+START via jslisten to quit)
 - [x] Pikachu Volleyball verified playable; clean exit confirmed, ES stays smooth
@@ -107,9 +107,11 @@ Host rg351v
 - `scripts/saves.sh` – back up / restore device saves (RetroArch savefiles,
   savestates, sidecar `.srm`/`.sav`, PPSSPP savedata) and pull/push RomM
   cloud saves
-- `scripts/build-pikaball.sh` (+ `scripts/pikaball.Dockerfile`) – cross-build
-  pikaball-revamped for aarch64 in Docker; binary lands in
-  `.storage/pikaball/`
-- `scripts/deploy-pikaball.sh` (+ `scripts/pikaball.PikachuVolleyball.sh`
-  launcher) – install the port to `/storage/roms/ports/pikaball/`
+- `scripts/build-port.sh <name>` (+ `scripts/ports/Dockerfile`) – cross-build a
+  CMake port for aarch64 in Docker; binary lands in `.storage/<name>/`
+- `scripts/deploy-port.sh <name>` – install the port to
+  `/storage/roms/ports/<REMOTE_SUBDIR>/` and restart EmulationStation
+- `scripts/ports/<name>/` – per-port `port.conf` (source dir, cmake args,
+  install paths) and `launcher.sh`; start a new port with
+  `cp -r scripts/ports/_template scripts/ports/<name>`. Currently: `pikaball`
 - `.storage/` – git-ignored, for anything secret or machine-specific

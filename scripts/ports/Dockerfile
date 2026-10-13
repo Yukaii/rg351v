@@ -1,6 +1,6 @@
-# Linux/aarch64 container for building pikaball_revamped for the RG351V.
+# Linux/aarch64 container for building CMake ports for the RG351V.
 # Rocky Linux 9 (glibc 2.34, older than the device's 2.36) with GCC 13 from
-# gcc-toolset-13 (the game's battery::embed NTTP idiom needs GCC 13+).
+# gcc-toolset-13 (pikaball's battery::embed NTTP idiom needs GCC 13+).
 # No ninja package on Rocky: it comes from pip.
 FROM rockylinux:9
 
