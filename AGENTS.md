@@ -3,11 +3,12 @@
 Notes, scripts and tweaks for an Anbernic RG351V handheld running AmberELEC (CoreELEC lineage, Linux 4.4 aarch64). The device is hacked over SSH from a macOS host; this repo holds what lives on the Mac side.
 
 ## Device Quick Facts
-- Host: `root@192.168.1.14` (hostname `RG351V`, Wi-Fi `wlan0`), key auth with `~/.ssh/id_ecdsa`.
+- Host: `root@RG351V.local` (hostname `RG351V`, Wi-Fi `wlan0`, DHCP so the
+  numeric IP moves; `192.168.1.14` is stale), key auth with `~/.ssh/id_ecdsa`.
 - RK3326, 4 cores, ~926 MB RAM. On-device tools: python3, git, curl, wget, rsync, nano. No gcc; cross-compile on the Mac.
 - Partitions: `/flash` (boot, 2G), `/storage` (system/config, 1.9G, keep small), `/storage/roms` (games, ~10G).
 - Config persists under `/storage`; the rootfs is read-only and resets on reboot. `/etc/shadow` is a symlink to `/storage/.cache/shadow`.
-- SMB share at `smb://192.168.1.14`; SSH on 22.
+- SMB share at `smb://RG351V.local`; SSH on 22.
 
 ## Project Structure
 - `README.md`: status checklist, device facts, access, gotchas. Keep the status section current.
@@ -16,7 +17,8 @@ Notes, scripts and tweaks for an Anbernic RG351V handheld running AmberELEC (Cor
 
 ## Coding Style
 - Shell: `bash`, `set -euo pipefail`, 2-space indent, `shellcheck` clean, format with `shfmt -i 2` when available.
-- Scripts take the target from `RG351V_HOST` (default `root@192.168.1.14`) rather than hard-coding it elsewhere.
+- Scripts take the target from `RG351V_HOST` (default `root@RG351V.local`) rather than hard-coding it elsewhere.
+- Scripts that write to the device must assert the remote hostname is `RG351V` and force IPv4 (`ssh -4`) before touching anything.
 - Remote commands run under BusyBox `ash`: no `nproc`, limited `ps`/`awk` flags. Test remote snippets on the device.
 - Keep changes minimal and portable.
 

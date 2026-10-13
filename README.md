@@ -2,13 +2,25 @@
 
 Notes, scripts and tweaks for my Anbernic RG351V running AmberELEC.
 
-## Status (2026-10-12)
+## Status (2026-10-13)
 
 - [x] Flashed `AmberELEC-RG351V.aarch64-20230203.img` to SD1 (replaced old 351ELEC install)
 - [x] First boot done, on Wi-Fi (`192.168.1.14`, hostname `RG351V`)
 - [x] SSH key auth set up (`id_ecdsa`)
 - [x] Root password changed from the default (stored outside this repo)
 - [x] Charging works with a proper charger (battery 100%)
+- [x] Homebrew verified: `hcl`, `opentyrian`, `prince` binaries work; unhid the
+  3 entries in `/storage/roms/homebrew/gamelist.xml` (they shipped hidden)
+- [x] Game sync via `scripts/sync.sh` (RomM → Mac → rsync to device)
+- [x] Save sync via `scripts/saves.sh` (`backup`/`restore` device↔Mac,
+  `pull` RomM cloud saves onto the device, `push` a save file to RomM)
+- [x] Pikachu Volleyball (pikaball-revamped) built for aarch64 via
+  `scripts/build-pikaball.sh` (Rocky 9 + GCC 13, static SDL3, glibc 2.34)
+- [x] Deployed to `/storage/roms/ports/pikaball/` via
+  `scripts/deploy-pikaball.sh` (launcher + native gamepad, no gptokeyb needed)
+- [x] Controls/exit documented in the Ports gamelist entry (move: dpad/stick,
+  hit: face buttons, START: pause, hold L2+SELECT+START via jslisten to quit)
+- [x] Pikachu Volleyball verified playable; clean exit confirmed, ES stays smooth
 - [ ] Copy BIOS files / ROMs
 - [ ] Back up `/storage` (saves, configs) off-device
 - [ ] Decide on update strategy (AmberELEC releases)
@@ -28,15 +40,15 @@ Notes, scripts and tweaks for my Anbernic RG351V running AmberELEC.
 ## Access
 
 ```sh
-ssh root@192.168.1.14          # key auth
-smb://192.168.1.14             # network share (roms, bios, saves)
+ssh root@RG351V.local       # key auth (.14 usually, but DHCP may move it)
+smb://RG351V.local          # network share (roms, bios, saves)
 ```
 
 Suggested `~/.ssh/config` entry:
 
 ```
 Host rg351v
-  HostName 192.168.1.14
+  HostName RG351V.local
   User root
   IdentityFile ~/.ssh/id_ecdsa
 ```
@@ -52,8 +64,52 @@ Host rg351v
   reads `1` when power is detected, `0` when not.
 - macOS flashing: `diskutil unmountDisk` then `dd` to `/dev/rdiskN` right away,
   or it gets remounted and `dd` fails with "Resource busy".
+- Stock homebrew entries are `<hidden>true</hidden>` in
+  `/storage/roms/homebrew/gamelist.xml`, so EmulationStation hides them even
+  though the binaries work. Back up the file, flip to `<hidden>false</hidden>`,
+  then `systemctl restart emustation`.
+- Non-interactive SSH does not source `/etc/profile`, so `/usr/local/bin`
+  (homebrew ports) is missing from `PATH`. Source it first:
+  `ssh root@RG351V.local '. /etc/profile; which hcl'`.
+- No on-device Wi-Fi sync app exists; sync from the Mac instead:
+  `scripts/sync.sh` downloads from RomM (`romm-cli`) and rsyncs to
+  `/storage/roms/`. RetroArch saves live in
+  `/storage/.config/retroarch/savefiles/` (plus `.srm` next to ROMs, since
+  `savefiles_in_content_dir` is true) and savestates in
+  `/storage/roms/savestates/<system>/`.
+- Prefer `RG351V.local` over the numeric IP: DHCP can move the device.
+  Scripts default to `root@RG351V.local`, force IPv4 (`-4`, mDNS also
+  resolves a link-local IPv6 address with a conflicting host key), and refuse
+  to run when the remote hostname is not `RG351V`.
+- This Mac is `ykmadeair.local`. If an SSH session answers with that hostname
+  or shows macOS paths (`/etc/cups`, no `/storage`), the command ran locally
+  because the `ssh` prefix was missing — not on the device. Always sanity-check
+  with `hostname` when output looks wrong.
+- Sleep drops Wi-Fi: when the device sleeps, ping and SSH time out. Wake it
+  first; no reconfiguration needed.
+- After a DHCP change, SSH fails with "Host key verification failed": clear
+  the stale entry with `ssh-keygen -R RG351V.local` (and the old numeric IP)
+  and reconnect once to store the device key.
+- Ports exit via jslisten: hold **L2 + SELECT + START** (buttons 10+7+6) to
+  `killall` the running port. A port left running in the background shares the
+  screen/CPU with EmulationStation and makes the menu crawl — check with
+  `ps | grep -v grep` and kill leftovers.
+- SDL3 ports need KMSDRM actually compiled in: the container must have the
+  GBM/EGL/udev `-devel` packages or SDL silently builds without it and init
+  fails with "No available video device". Pin `SDL_VIDEODRIVER=kmsdrm` in the
+  launcher; SDL3's default driver pick is unreliable without X11/Wayland.
 
 ## Layout
 
 - `scripts/info.sh` – print a quick status snapshot of the device over SSH
+- `scripts/sync.sh` – download games from RomM and push them to `/storage/roms/`
+  (`--pick` for an interactive fzf picker, `--platform`/`--search` to filter)
+- `scripts/saves.sh` – back up / restore device saves (RetroArch savefiles,
+  savestates, sidecar `.srm`/`.sav`, PPSSPP savedata) and pull/push RomM
+  cloud saves
+- `scripts/build-pikaball.sh` (+ `scripts/pikaball.Dockerfile`) – cross-build
+  pikaball-revamped for aarch64 in Docker; binary lands in
+  `.storage/pikaball/`
+- `scripts/deploy-pikaball.sh` (+ `scripts/pikaball.PikachuVolleyball.sh`
+  launcher) – install the port to `/storage/roms/ports/pikaball/`
 - `.storage/` – git-ignored, for anything secret or machine-specific
