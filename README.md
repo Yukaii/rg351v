@@ -129,6 +129,8 @@ Host rg351v
 - `scripts/wifi.sh install|known|forget|push|...` – on-device hook that
   remembers every network saved in the ES menu (see Gotchas); also bulk-add
   from the Mac
+- `scripts/tune.sh get|set|preset` – CPU/GPU/DRAM governors and clocks, core
+  count, backlight, timed screen-off (sysfs, resets on reboot)
 - `scripts/lib/device.sh` – shared host/ssh/hostname-assert helpers
 - `.storage/` – git-ignored, for anything secret or machine-specific
 - Sleep: the power key runs a real kernel suspend (`mem`, logind
@@ -152,3 +154,9 @@ Host rg351v
   `known.config`. The network in `wifi.config` is excluded so one SSID never
   comes from two files. Forget one with `scripts/wifi.sh forget <ssid>`; the ES
   Wi-Fi screen still lists only the active one. Idle floor measured: ~450 mA (~7.5 h) at brightness 24, ES menu.
+- CPU tuning (load test, 4 python jobs, same work): capping `cpu-max` at
+  1008 MHz is ~25% slower but ~25% less energy above idle (noisy: idle
+  swings 420-480 mA under ES). Idle is unaffected because idle cores sit in
+  WFI. 1008 MHz is the lowest OPP (no lower clock exists in the kernel).
+  Backlight off saves only ~21 mA at brightness 24. Wi-Fi power save is not
+  supported by the mt7601u driver (`-95`).
