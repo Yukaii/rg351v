@@ -23,7 +23,10 @@ Notes, scripts and tweaks for my Anbernic RG351V running AmberELEC.
 - [x] Pikachu Volleyball verified playable; clean exit confirmed, ES stays smooth
 - [x] Monitoring: `scripts/perf.sh` (snapshot/watch) and
   `scripts/battery-log.sh` (on-device sampler + awake/standby summary)
-- [ ] Measure real battery life on discharge (reading + standby)
+- [x] Measured battery life (2026-10-13, 3380 mAh, brightness 24, ES menu):
+  awake idle ~448 mA / 1.7 W (~7.5 h); power-key suspend <1% drop over 69 min
+  (i.e. <~29 mA, >100 h, at least 15x better than awake); SoC 49 C awake ->
+  36 C asleep; Wi-Fi back within ~15 s of resume
 - [ ] Copy BIOS files / ROMs
 - [ ] Back up `/storage` (saves, configs) off-device
 - [ ] Decide on update strategy (AmberELEC releases)
