@@ -17,7 +17,7 @@ RSYNC_SSH="ssh -4 -o BatchMode=yes -o ConnectTimeout=8"
 SCRATCH_DIR=""
 trap '[ -n "${SCRATCH_DIR:-}" ] && rm -rf "$SCRATCH_DIR"' EXIT
 
-# Refuse to touch anything that is not the handheld (see README gotchas).
+# Refuse to touch anything that is not the handheld (see docs/gotchas.md).
 assert_device() {
   local name
   name="$("${SSH[@]}" "$HOST" 'hostname')"
