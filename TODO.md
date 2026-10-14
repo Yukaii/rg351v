@@ -32,6 +32,8 @@ Open work and what is already done. Facts learned along the way go in
 
 - [x] Find an official prebuilt aarch64 headless backend candidate (Anki 26.9.3)
 - [x] Verify backend import and collection/scheduler operations on the device
+- [x] Verify two-client sync against the official local server: offline review,
+  concurrent edits, media, full-download guards, backups and repeat sync
 - [ ] Verify AnkiWeb sync round-trip with a test deck, including offline reviews
 - [ ] Build a gamepad review UI with a limited card renderer
 

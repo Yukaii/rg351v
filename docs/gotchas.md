@@ -311,6 +311,32 @@ matching heading (or a new one), with the date when it is a measurement.
   with Mac Python 3.11.11 and checked-hash bytecode resolved the import stall
   on device Python 3.11.1. The cause in AmberELEC's compiler is not established.
   `scripts/anki.sh prepare` performs this step; no device-side pip is needed.
+- Sync protocol verified (2026-10-14): `scripts/anki.sh probe-sync` runs the
+  official 26.9.3 sync server on Mac loopback, reached through an SSH reverse
+  tunnel. A Mac client seeded a Basic card and PNG; the handheld logged in and
+  downloaded both. With the server stopped, the handheld reviewed and edited
+  the card and added media, while the Mac added another card. Subsequent normal
+  sync merged both clients' changes; Mac received the review, scheduling, note
+  edit and handheld media. Repeated sync did not duplicate the review. This
+  verifies the official protocol, not connectivity/auth against public AnkiWeb.
+- Full sync requires `close_for_full_sync()` before transfer and
+  `reopen(after_full_sync=True)` afterward. Sync output can require a download,
+  upload, or explicit conflict resolution; never automatically upload a fresh
+  handheld collection. `sync_client.py` requires an explicit full-sync direction,
+  backs up the collection before sync and waits for media completion separately.
+  Integration checks exercised refused default/full-upload choices on an empty
+  handheld, plus successful full download and collection backups.
+- Terminal login stores only the upstream sync token on ext4 under
+  `/storage/.config/rg351v/anki/` (mode 600); exFAT cannot enforce private modes.
+  Collection/media/backups stay on the larger ROM partition. Existing auth files
+  are copied to `.bak` before replacement. The CLI's status, sync, token mode and
+  token backup were verified with the disposable server/account on the Mac;
+  token mode 600 and backup-before-replacement also passed on device ext4.
+- After reboot (2026-10-14), the deployed sync CLI loaded successfully. A separate
+  `Collection.sync_status(SyncAuth(...))` call to the default public AnkiWeb
+  endpoint with a deliberately invalid token returned `SyncErrorKind.AUTH`,
+  verifying that the handheld backend can reach its HTTPS/API path. No valid
+  account credentials were used; actual AnkiWeb collection/media sync is pending.
 
 ## PocketJS (evaluated, not pursued)
 

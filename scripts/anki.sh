@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Prepare a prebuilt headless Anki backend; run a disposable on-device probe.
-# Usage: scripts/anki.sh prepare | probe
+# Prebuilt headless Anki backend, disposable probes, and terminal sync.
+# Usage: scripts/anki.sh prepare | deploy | probe | probe-sync | login | status
+#        scripts/anki.sh sync [--full download|upload]
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -26,7 +27,7 @@ prepare)
     --invalidation-mode checked-hash \
     -s "$LOCAL/site-packages" -p "$REMOTE/site-packages" "$LOCAL/site-packages"
   ;;
-probe)
+deploy | probe)
   [[ -f "$LOCAL/site-packages/anki/_rsbridge.so" ]] || {
     echo "run scripts/anki.sh prepare first" >&2
     exit 1
@@ -35,12 +36,39 @@ probe)
   "${SSH[@]}" "$HOST" "mkdir -p $REMOTE"
   tar -C "$LOCAL" -czf - site-packages |
     "${SSH[@]}" "$HOST" "tar -xzf - -C $REMOTE"
-  "${SCP[@]}" "$ROOT/apps/anki/probe.py" "$HOST:$REMOTE/probe.py"
-  "${SSH[@]}" "$HOST" \
-    "timeout -s KILL 45 env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$REMOTE/site-packages python3 $REMOTE/probe.py"
+  "${SCP[@]}" "$ROOT/apps/anki/"{probe,sync_client,sync_cli,sync_probe}.py "$HOST:$REMOTE/"
+  if [[ "$1" == probe ]]; then
+    "${SSH[@]}" "$HOST" \
+      "timeout -s KILL 45 env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$REMOTE/site-packages python3 $REMOTE/probe.py"
+  fi
+  ;;
+probe-sync)
+  [[ -x "$ROOT/.storage/anki-host/bin/python" ]] ||
+    uv venv --python 3.11 "$ROOT/.storage/anki-host"
+  uv pip install --python "$ROOT/.storage/anki-host/bin/python" \
+    -r "$ROOT/apps/anki/requirements.txt"
+  "$ROOT/.storage/anki-host/bin/python" "$ROOT/apps/anki/sync_probe.py"
+  ;;
+login | status | sync)
+  action="$1"
+  shift
+  full=""
+  if [[ "$action" == sync && $# == 2 && "$1" == --full && "$2" =~ ^(download|upload)$ ]]; then
+    full=" --full $2"
+  elif [[ $# != 0 ]]; then
+    echo "usage: ${0##*/} login | status | sync [--full download|upload]" >&2
+    exit 1
+  fi
+  assert_device
+  command="env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$REMOTE/site-packages python3 $REMOTE/sync_cli.py $action$full"
+  if [[ "$action" == login ]]; then
+    "${SSH[@]}" -t "$HOST" "$command"
+  else
+    "${SSH[@]}" "$HOST" "$command"
+  fi
   ;;
 *)
-  echo "usage: ${0##*/} prepare | probe" >&2
+  echo "usage: ${0##*/} prepare | deploy | probe | probe-sync | login | status | sync [--full download|upload]" >&2
   exit 1
   ;;
 esac

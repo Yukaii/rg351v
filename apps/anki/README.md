@@ -33,12 +33,60 @@ to 45 seconds and checks:
 Verified on device and again after reboot (2026-10-14). Imports took ~3 seconds
 warm and ~12 seconds just after boot; collection checks took ~2 seconds. The
 installed bundle occupies ~76 MB on exFAT. These checks do not verify screen
-rendering, FSRS-specific behavior or AnkiWeb connectivity/sync.
+rendering or FSRS-specific behavior.
+
+## Sync and login
+
+```sh
+bash scripts/anki.sh deploy
+bash scripts/anki.sh login
+bash scripts/anki.sh status
+bash scripts/anki.sh sync --full download  # initial download from AnkiWeb
+bash scripts/anki.sh sync                  # subsequent incremental sync
+```
+
+`login` opens a terminal over SSH and prompts for your Anki email and password.
+It stores only the returned sync token, in
+`/storage/.config/rg351v/anki/auth.bin` (mode 600, on ext4), backing up an
+existing token before replacing it. Passwords are not stored. Enter credentials
+in your terminal, not in chat or command arguments.
+
+The collection and media live in `/storage/roms/homebrew/anki-data/`, with
+automatic pre-sync collection backups in its `backups/` directory. These are
+collection backups, not copies of all media. Normal sync waits for media to
+finish; a media failure is reported even if collection sync succeeded.
+
+A required full sync stops until you choose `--full download` or `--full upload`.
+Download replaces the handheld collection; upload replaces the remote collection.
+The wrapper also rejects a direction the backend says is unavailable. The first
+download is appropriate when your existing collection is already on AnkiWeb.
+
+## Disposable sync integration test
+
+```sh
+bash scripts/anki.sh probe-sync
+```
+
+Requires the deployed backend. This installs a matching Mac headless backend in
+`.storage/anki-host/`, starts the official sync server bound to Mac loopback,
+and gives the handheld access through a temporary SSH reverse tunnel. It uses
+random test credentials and separate temporary collections; it never contacts
+AnkiWeb or uses your account. Server, tunnel and test collections are cleaned
+up on completion. The open tunnel also prevents device autosleep during testing.
+
+Verified on hardware (2026-10-14): initial login/full card and image download;
+review and note edit while the server is stopped; concurrent Mac card addition;
+bidirectional incremental review/scheduling/note/media sync; repeat sync without
+duplicate reviews; full-sync direction guards; pre-sync backups; and terminal
+status/sync with private token storage. The deployed CLI also loaded after reboot.
+Public AnkiWeb HTTPS/API connectivity passed a separate test using a deliberately
+invalid token (expected AUTH rejection); valid account login/sync remains untested
+until an account is connected.
 
 ## Next milestones
 
-1. Sync a disposable test collection through AnkiWeb and verify offline reviews
-   appear in desktop Anki, including media and initial full-download handling.
+1. Connect an AnkiWeb account and verify reviews appear in desktop Anki. The
+   underlying protocol round-trip has passed against the official local server.
 2. Build the deck picker and question/answer UI, with four physical rating buttons.
 3. Add undo, scrolling, media playback and suspend/resume handling.
 
