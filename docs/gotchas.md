@@ -126,7 +126,7 @@ matching heading (or a new one), with the date when it is a measurement.
 - JavaScript support (2026-10-14): upstream QuickJS-NG 0.17.0 Linux/aarch64
   binary runs on AmberELEC and occupies ~2.4 MB. Its release SHA-256 is pinned
   in `youtube.sh`. The yt-dlp zip already includes compatible EJS solver code;
-  `--js-runtimes quickjs:/storage/roms/ports/youtube/qjs` enables it explicitly.
+  `--js-runtimes quickjs:/storage/roms/homebrew/youtube/qjs` enables it explicitly.
   Recognition removes the missing-runtime warning, but cannot fix client-side
   access restrictions or missing formats. Forcing web_safari yielded only
   storyboards on the test video; forcing tv on another video was rejected.
@@ -151,6 +151,28 @@ matching heading (or a new one), with the date when it is a measurement.
 - mpv can close IPC between the wrapper's process check and next request at
   natural EOF. Treat broken/reset connections like EOF, wait for its exit
   status and clean up the marker; natural EOF was retested successfully.
+- UI verified on screen (2026-10-14): native SDL2/ctypes browser uses the
+  shared Unifont asset, searches 12 results with yt-dlp's flat playlist mode,
+  downloads JPEG thumbnails and stores saved videos in the app directory.
+  User confirmed play/return-to-results and X/L1/Start keyboard/search controls.
+  App and launcher now live under Homebrew, with the gamelist backed up before
+  registration. Earlier Ports search/saved data is retained on upgrade.
+- Menu launch failure (2026-10-14): EmulationStation supplies arguments like
+  `-Pports`; interpreting any first argument as a media filename tried to play
+  a nonexistent `-Pports` file. The launcher now uses explicit `--play <file>`
+  for CLI playback and opens the browser for normal menu arguments.
+- Actual OSH controller mapping (2026-10-14): JSIOCGBTNMAP yields codes
+  304..315; SDL DB maps A/B/X/Y to b0/b1/b2/b3, L1/R1 to b4/b5 and Start/Select
+  to b6/b7. Thus X is 306, Y is 307, L1/R1 are 308/309 and Start/Select are
+  310/311. The initial standard-code assumptions were wrong for the latter
+  buttons; both UI and playback controls now use the measured order.
+- Resolve latency can look like an unresponsive A button. The browser now
+  shows elapsed loading time and allows cancellation. A matching cached
+  manifest is reusable for ten minutes only while every URL's `expire`
+  parameter remains at least sixty seconds in the future.
+  After reboot (2026-10-14), Homebrew registration, cached results and font
+  assets persisted; the SDL display opened/closed twice and rendered results
+  and keyboard states successfully. Browser/sleep regression suites: 16 tests.
 
 ## Storage, EmulationStation and ports
 

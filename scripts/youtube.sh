@@ -6,7 +6,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 # shellcheck source=lib/device.sh
 source "$HERE/lib/device.sh"
 LOCAL="$ROOT/.storage/youtube"
-REMOTE=/storage/roms/ports/youtube
+REMOTE=/storage/roms/homebrew/youtube
 mkdir -p "$LOCAL"
 
 case "${1:-}" in
@@ -37,6 +37,20 @@ install)
     exit 1
   }
   assert_device
+  "${SSH[@]}" "$HOST" "if [ -d /storage/roms/ports/youtube ]; then
+      if [ ! -d $REMOTE ]; then
+        mv /storage/roms/ports/youtube $REMOTE
+      else
+        for file in search.json saved.json; do
+          if [ -f /storage/roms/ports/youtube/\$file ] && [ ! -f $REMOTE/\$file ]; then
+            cp -p /storage/roms/ports/youtube/\$file $REMOTE/\$file
+          fi
+        done
+        if [ ! -d $REMOTE/thumbnails ] && [ -d /storage/roms/ports/youtube/thumbnails ]; then
+          cp -rp /storage/roms/ports/youtube/thumbnails $REMOTE/
+        fi
+      fi
+    fi"
   "${SSH[@]}" "$HOST" "mkdir -p $REMOTE"
   if [[ ! -s "$LOCAL/yt-dlp" ]]; then
     curl -fL --silent --show-error \
@@ -47,7 +61,8 @@ install)
     echo "yt-dlp checksum mismatch" >&2
     exit 1
   }
-  "${SCP[@]}" "$LOCAL/test-360p.mp4" "$LOCAL/yt-dlp" "$HERE/device/youtube-player.py" "$HOST:$REMOTE/"
+  "${SCP[@]}" "$LOCAL/test-360p.mp4" "$LOCAL/yt-dlp" "$HERE/device/youtube-player.py" \
+    "$ROOT/apps/youtube/youtube-ui.py" "$ROOT/.storage/ptterm-data/unifont.bin" "$HOST:$REMOTE/"
   if [[ ! -s "$LOCAL/qjs" ]]; then
     curl -fL --silent --show-error \
       https://github.com/quickjs-ng/quickjs/releases/download/v0.17.0/qjs-linux-aarch64 \
@@ -58,16 +73,31 @@ install)
     exit 1
   }
   "${SCP[@]}" "$LOCAL/qjs" "$HOST:$REMOTE/"
-  "${SCP[@]}" "$HERE/ports/youtube/launcher.sh" "$HOST:/storage/roms/ports/YouTube.sh"
-  "${SSH[@]}" "$HOST" "chmod +x /storage/roms/ports/YouTube.sh $REMOTE/qjs"
-  echo "installed: Ports > YouTube (refresh the game list if needed)"
+  "${SCP[@]}" "$HERE/ports/youtube/launcher.sh" "$HOST:/storage/roms/homebrew/YouTube.sh"
+  "${SCP[@]}" "$HERE/device/gamelist-set.py" "$HOST:/tmp/youtube-gamelist.py"
+  "${SSH[@]}" "$HOST" "chmod +x /storage/roms/homebrew/YouTube.sh $REMOTE/qjs
+    systemctl stop emustation
+    trap 'systemctl start emustation' EXIT
+    cp -p /storage/roms/homebrew/gamelist.xml /storage/roms/homebrew/gamelist.xml.bak-youtube
+    python3 /tmp/youtube-gamelist.py /storage/roms/homebrew/gamelist.xml ./YouTube.sh YouTube \
+      'Search and watch YouTube videos. X: search, A: play, Y: saved videos, R1: save, B: back/exit.' rg351v
+    if [ -f /storage/roms/ports/YouTube.sh ]; then
+      mv /storage/roms/ports/YouTube.sh /storage/roms/ports/YouTube.sh.bak-homebrew
+    fi"
+  echo "installed: Homebrew > YouTube"
   ;;
 play)
   assert_device
   # Keep SSH open during measurements, and restore ES even if mpv fails.
   "${SSH[@]}" "$HOST" "systemctl stop emustation
       trap 'systemctl start emustation' EXIT
-      bash /storage/roms/ports/YouTube.sh"
+      bash /storage/roms/homebrew/YouTube.sh --play test-360p.mp4"
+  ;;
+ui)
+  assert_device
+  "${SSH[@]}" "$HOST" "systemctl stop emustation
+      trap 'systemctl start emustation' EXIT
+      bash /storage/roms/homebrew/YouTube.sh"
   ;;
 stream)
   [[ $# == 2 ]] || {
@@ -84,14 +114,14 @@ stream)
       --batch-file $REMOTE/url.txt > $REMOTE/stream.json"
   "${SSH[@]}" "$HOST" "systemctl stop emustation
       trap 'systemctl start emustation' EXIT
-      bash /storage/roms/ports/YouTube.sh stream.json"
+      bash /storage/roms/homebrew/YouTube.sh --play stream.json"
   ;;
 log)
   assert_device
   "${SSH[@]}" "$HOST" 'cat /tmp/logs/youtube.log'
   ;;
 *)
-  echo "usage: $0 {probe|prepare <URL>|install|play|stream <URL>|log}" >&2
+  echo "usage: $0 {probe|prepare <URL>|install|ui|play|stream <URL>|log}" >&2
   exit 1
   ;;
 esac

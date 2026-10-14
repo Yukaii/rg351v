@@ -116,9 +116,9 @@ def main():
                 for offset in range(0, len(data), event.size):
                     _, _, kind, code, value = event.unpack_from(data, offset)
                     if kind == 1 and value == 1:
-                        if code in (304, 315):
+                        if code in (304, 310):
                             command('cycle', 'pause')
-                        elif code in (305, 314):
+                        elif code in (305, 311):
                             command('quit')
                             return player.wait()
                     elif kind == 3 and value != 0:
