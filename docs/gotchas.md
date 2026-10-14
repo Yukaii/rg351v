@@ -337,6 +337,14 @@ matching heading (or a new one), with the date when it is a measurement.
   endpoint with a deliberately invalid token returned `SyncErrorKind.AUTH`,
   verifying that the handheld backend can reach its HTTPS/API path. No valid
   account credentials were used; actual AnkiWeb collection/media sync is pending.
+- First real-account download (2026-10-14): an unconditional 180-second media
+  deadline aborted a healthy initial transfer after ~159 MB of local Anki data.
+  The collection was already downloaded and media resumed on the next normal
+  sync. Use a 180-second *no-progress* deadline, reset when the upstream media
+  counters change; do not impose that limit on total transfer duration. Regression
+  checks cover a progressing transfer lasting >180 seconds and a stalled transfer.
+  Terminal sync now reports phase/counter progress on stderr, retaining JSON on
+  stdout for callers.
 
 ## PocketJS (evaluated, not pursued)
 

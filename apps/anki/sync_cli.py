@@ -66,7 +66,9 @@ def main():
             else:
                 try:
                     result = sync_collection(col, auth, full=args.full,
-                                             backup_dir=args.data_dir / "backups")
+                                             backup_dir=args.data_dir / "backups",
+                                             on_progress=lambda message: print(
+                                                 message, file=sys.stderr, flush=True))
                 finally:
                     # Retain a server redirect even when a full-sync choice is pending.
                     save_auth(args.auth_file, auth)

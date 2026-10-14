@@ -55,6 +55,10 @@ The collection and media live in `/storage/roms/homebrew/anki-data/`, with
 automatic pre-sync collection backups in its `backups/` directory. These are
 collection backups, not copies of all media. Normal sync waits for media to
 finish; a media failure is reported even if collection sync succeeded.
+The terminal prints collection/media progress to stderr (the final result is
+JSON on stdout). Initial media downloads can take several minutes; the wrapper
+times out after 180 seconds without progress, rather than limiting total runtime.
+Retrying a failed media sync resumes using the files already downloaded.
 
 A required full sync stops until you choose `--full download` or `--full upload`.
 Download replaces the handheld collection; upload replaces the remote collection.
