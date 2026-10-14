@@ -345,6 +345,26 @@ matching heading (or a new one), with the date when it is a measurement.
   checks cover a progressing transfer lasting >180 seconds and a stalled transfer.
   Terminal sync now reports phase/counter progress on stderr, retaining JSON on
   stdout for callers.
+- Real AnkiWeb round-trip verified (2026-10-15): downloaded 7,303 cards,
+  36,902 existing review records and 14,779 media files (~829 MB of local data
+  at initial completion). An independent temporary Mac client downloaded the
+  same collection/media directly through AnkiWeb. A UUID-marked test note/card
+  and PNG uploaded from the handheld arrived on the Mac. A Good review recorded
+  locally on the handheld then arrived on the Mac with `reps=1` and one matching
+  revlog record. Test note/deck/tag/active media were removed and synced; no
+  existing cards were reviewed. The Mac verifier's collection was removed and
+  its auth token was held only in process memory, never printed or saved there.
+- Cleanup detail (2026-10-15): Anki retains revlog entries after note/card
+  deletion, and incremental sync has graves for cards/notes/decks, not revlogs.
+  The real-account test consequently left one synthetic review record (total
+  36,903); existing history was unchanged. A final cleanup assertion expecting
+  the test revlog to disappear was incorrect, though the review round-trip and
+  object/media deletion checks passed. Do not repeat real-account review tests
+  or force a full upload to remove that single record; use the disposable local
+  server for future integration tests.
+- Persistence verified (2026-10-15): after another reboot, the saved real-account
+  token authenticated successfully and collection/media sync both completed
+  without another full download.
 
 ## PocketJS (evaluated, not pursued)
 

@@ -83,16 +83,27 @@ review and note edit while the server is stopped; concurrent Mac card addition;
 bidirectional incremental review/scheduling/note/media sync; repeat sync without
 duplicate reviews; full-sync direction guards; pre-sync backups; and terminal
 status/sync with private token storage. The deployed CLI also loaded after reboot.
-Public AnkiWeb HTTPS/API connectivity passed a separate test using a deliberately
-invalid token (expected AUTH rejection); valid account login/sync remains untested
-until an account is connected.
+Public AnkiWeb HTTPS/API connectivity also passed a separate test using a
+deliberately invalid token (expected AUTH rejection).
+
+## AnkiWeb verification
+
+Verified with the connected account (2026-10-15): full collection/media download,
+then an isolated test card and PNG uploaded from the handheld and downloaded
+by a separate Mac headless client. A locally recorded Good review subsequently
+arrived on the Mac through AnkiWeb, including scheduling and review history.
+The test note, deck, tag and active media file were removed afterward.
+
+Anki retains review logs when cards are deleted. The real-account test therefore
+left one synthetic review record; existing review records were not modified.
+Use the disposable local-server test for future automated review tests, so those
+records stay out of a real account. Do not force a full upload just to erase a
+test review from all clients.
 
 ## Next milestones
 
-1. Connect an AnkiWeb account and verify reviews appear in desktop Anki. The
-   underlying protocol round-trip has passed against the official local server.
-2. Build the deck picker and question/answer UI, with four physical rating buttons.
-3. Add undo, scrolling, media playback and suspend/resume handling.
+1. Build the deck picker and question/answer UI, with four physical rating buttons.
+2. Add undo, scrolling, media playback and suspend/resume handling.
 
 Keep credentials and real collections outside git. The upstream backend is
 AGPL-3.0-or-later; retain its license/source obligations when distributing.
