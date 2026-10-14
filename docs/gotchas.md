@@ -176,6 +176,11 @@ matching heading (or a new one), with the date when it is a measurement.
 
 ## Storage, EmulationStation and ports
 
+- RomM picker downloads can arrive under `<output>/<platform_slug>/` even
+  for a single ROM. Merge that folder's contents into the staging platform
+  folder with rsync; moving the whole folder creates `gba/gba/` and fails on
+  the second download when that directory is already populated.
+
 - macOS flashing: `diskutil unmountDisk` then `dd` to `/dev/rdiskN` right away,
   or it gets remounted and `dd` fails with "Resource busy".
 - Stock homebrew entries are `<hidden>true</hidden>` in

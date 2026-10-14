@@ -141,7 +141,7 @@ pick_roms() {
     return 0
   fi
 
-  local ids id platform dest tmpdir zipfile
+  local ids id platform dest tmpdir zipfile source_dir
   ids="$(printf '%s\n' "$selected" | cut -f1)"
   while IFS= read -r id; do
     [[ -n "$id" ]] || continue
@@ -151,11 +151,14 @@ pick_roms() {
     tmpdir="$(mktemp -d /tmp/romm-dl.XXXXXX)"
     echo "==> downloading id $id to $dest"
     if romm-cli download "$id" -o "$tmpdir"; then
-      zipfile="$(find "$tmpdir" -maxdepth 1 -name '*.zip' | head -n 1)"
+      # Single-ROM downloads can already be under <output>/<platform>/.
+      source_dir="$tmpdir"
+      [[ ! -d "$tmpdir/$platform" ]] || source_dir="$tmpdir/$platform"
+      zipfile="$(find "$source_dir" -maxdepth 1 -name '*.zip' | head -n 1)"
       if [[ -n "${zipfile:-}" ]]; then
         unzip -o -q "$zipfile" -d "$dest" && rm "$zipfile"
       else
-        mv "$tmpdir"/* "$dest"/
+        rsync -a "$source_dir/" "$dest/"
       fi
     else
       echo "download failed for id $id" >&2

@@ -35,6 +35,7 @@ Open work and what is already done. Facts learned along the way go in
 - [x] Charging works with a proper charger
 - [x] Homebrew verified (`hcl`, `opentyrian`, `prince`); unhid the 3 entries
 - [x] Game sync (`scripts/sync.sh`) and save sync (`scripts/saves.sh`)
+- [x] Fix RomM picker downloads nesting platform folders and failing on the second game
 - [x] Pikachu Volleyball built, deployed and verified (`scripts/build-port.sh pikaball`)
 - [x] Monitoring: `scripts/perf.sh`, `scripts/battery-log.sh`
 - [x] Wi-Fi remember hook (`scripts/wifi.sh install`), verified across a reboot
