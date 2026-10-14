@@ -17,8 +17,26 @@ scripts/youtube.sh log
 `prepare` uses Mac-side yt-dlp and ffmpeg to download the first minute without
 transcoding. `stream` runs the bundled, checksum-verified yt-dlp 2026.08.19
 on the handheld, then plays its video/audio URLs directly. SSH stays open
-during playback to prevent autosleep; EmulationStation returns on exit.
+during these measurements; EmulationStation returns on exit.
 The Mac provides orchestration, not a media proxy.
+
+The installer bundles checksum-verified QuickJS-NG 0.17.0 (2.4 MB). yt-dlp
+uses it to execute YouTube's JavaScript stream-URL challenges, together with
+the solver scripts already in the yt-dlp zip. It runs during extraction,
+not continuously during video playback. No browser is installed.
+
+Upgrade the autosleep watcher with `scripts/autosleep.sh install`. The player
+refreshes `/run/rg351v/video-playing.json` once per second while unpaused.
+The watcher checks heartbeat age (<15 seconds), mpv PID and process start
+time, so a crashed wrapper or reused PID cannot leave sleep blocked indefinitely.
+Pausing removes the marker; other normal blockers such as charging and busy
+Wi-Fi still apply. The wrapper rescans the controller after USB re-enumeration.
+
+Run the marker safety checks with:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/device/tests -v
+```
 
 Controls: A/Start pauses; B/Select exits; D-pad left/right seeks 10 seconds;
 D-pad up/down adjusts volume. Button names follow the Linux input mapping;
@@ -38,9 +56,8 @@ Stream manifests contain expiring URLs; they stay outside git.
 
 Limits and next steps:
 
-- Only one public video has been exercised. Full YouTube support requires
-  a supported JavaScript runtime; extraction currently warns that formats
-  may be missing. Add QuickJS and verify more videos before calling it complete.
+- Playback coverage is still narrow. QuickJS supports URL challenges, but
+  cannot make unavailable videos, login requirements or missing client formats
+  disappear. More videos and longer streaming sessions need verification.
 - Add a standalone URL/search interface, thumbnails and saved videos.
-- Add playback-aware autosleep handling before launching long videos without SSH.
 - Measure 480p, longer playback and battery use across more demanding scenes.

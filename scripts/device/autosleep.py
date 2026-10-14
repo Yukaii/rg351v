@@ -13,6 +13,8 @@ It does not suspend while:
   * music is playing: deckd keeps /run/rg351v/playing while a
     track plays (a stop within the last 45 s still counts, to bridge track
     changes), and only while deckd (or librespot) is running.
+  * video is playing: the YouTube wrapper refreshes a PID/start-time marker;
+    paused playback, dead players and stale markers do not block autosleep.
 
 Config (re-read every loop, so `autosleep.sh set` needs no restart):
   /storage/.config/rg351v/autosleep.conf   KEY=value lines
@@ -28,6 +30,7 @@ AUTOSLEEP_CONF environment variable overrides the config path.
 import errno
 import fcntl
 import glob
+import json
 import os
 import select
 import struct
@@ -176,6 +179,7 @@ def ssh_open():
 
 
 PLAYING_FLAG = "/run/rg351v/playing"
+VIDEO_PLAYING_FLAG = "/run/rg351v/video-playing.json"
 STOPPED_FLAG = "/run/rg351v/stopped"
 STOP_GRACE = 45.0  # seconds a stop still counts as playing (track changes)
 
@@ -202,6 +206,22 @@ def wifi_bytes():
         except ValueError:
             pass
     return total
+
+
+def video_playing():
+    try:
+        with open(VIDEO_PLAYING_FLAG) as file:
+            state = json.load(file)
+        age = time.monotonic() - float(state['updated'])
+        if not 0 <= age < 15:
+            return False
+        pid = int(state['pid'])
+        if pid <= 0 or read_text('/proc/%d/comm' % pid) != 'mpv':
+            return False
+        fields = read_text('/proc/%d/stat' % pid).split(') ')[1].split()
+        return fields[19] == state['start_ticks']
+    except (OSError, ValueError, TypeError, KeyError, IndexError):
+        return False
 
 
 def boot_minus_mono():
@@ -254,6 +274,8 @@ def main():
             reason = "ssh session"
         elif music_playing():
             reason = "music playing"
+        elif video_playing():
+            reason = "video playing"
         elif len(samples) >= 2:
             dt = samples[-1][0] - samples[0][0]
             kbps = (samples[-1][1] - samples[0][1]) / 1024.0 / max(dt, 1.0)

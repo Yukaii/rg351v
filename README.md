@@ -9,7 +9,7 @@ repo is the Mac side plus the apps cross-built for the device.
 | | |
 |---|---|
 | **deck** | Spotify player with a retro UI: now playing, liked songs, albums, playlists, search, queue, album art (`apps/deck`, daemon `apps/deckd`) |
-| **Auto-suspend** | suspends after 5 idle minutes unless charging, SSH, busy Wi-Fi or music |
+| **Auto-suspend** | suspends after 5 idle minutes unless charging, SSH, busy Wi-Fi, music or video |
 | **ptterm** | tiny SDL3 BBS terminal for PTT with an on-screen keyboard |
 | **YouTube prototype** | 360p playback, on-device stream extraction and gamepad controls ([usage](apps/youtube/README.md)) |
 | **Ports / homebrew** | Pikachu Volleyball, KOReader built or repackaged for KMSDRM |

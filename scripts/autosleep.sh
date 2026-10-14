@@ -57,6 +57,9 @@ install)
   [[ "$minutes" =~ ^[0-9]+$ ]] || die "minutes must be a non-negative integer"
   assert_device
   remote "mkdir -p $CONF_DIR $UNIT_DIR/multi-user.target.wants"
+  remote "for file in $REMOTE_PY $UNIT_DIR/$UNIT $UNIT_DIR/$SLEEP_UNIT; do
+    [ ! -f \"\$file\" ] || cp -p \"\$file\" \"\$file.bak\"
+    done"
   "${SCP[@]}" "$HERE/device/autosleep.py" "$HOST:$REMOTE_PY"
   "${SCP[@]}" "$HERE/device/$UNIT" "$HOST:$UNIT_DIR/$UNIT"
   "${SCP[@]}" "$HERE/device/$SLEEP_UNIT" "$HOST:$UNIT_DIR/$SLEEP_UNIT"

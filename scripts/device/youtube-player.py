@@ -32,12 +32,27 @@ def main():
     lock = (runtime / 'youtube.lock').open('w')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     ipc = str(runtime / 'youtube.sock')
+    playing = runtime / 'video-playing.json'
+    playing.unlink(missing_ok=True)
     Path(ipc).unlink(missing_ok=True)
-    inputs = []
-    for node in glob.glob('/dev/input/event*'):
-        name = Path('/sys/class/input', Path(node).name, 'device/name')
-        if 'OSH PB Controller' in name.read_text():
-            inputs.append(os.open(node, os.O_RDONLY | os.O_NONBLOCK))
+    inputs = {}
+
+    def rescan_inputs():
+        for node, fd in list(inputs.items()):
+            if not Path(node).exists():
+                os.close(fd)
+                del inputs[node]
+        for node in glob.glob('/dev/input/event*'):
+            if node in inputs:
+                continue
+            try:
+                name = Path('/sys/class/input', Path(node).name, 'device/name')
+                if 'OSH PB Controller' in name.read_text():
+                    inputs[node] = os.open(node, os.O_RDONLY | os.O_NONBLOCK)
+            except OSError:
+                pass  # Controller is re-enumerating after suspend.
+
+    rescan_inputs()
     player = subprocess.Popen([
         'mpv', '--no-config', '--vo=sdl', '--hwdec=no', '--ao=alsa',
         '--audio-device=alsa/default', '--input-gamepad=no', '--fullscreen',
@@ -78,12 +93,26 @@ def main():
         next_sample = time.monotonic() + 5
         cpu_time = time.monotonic()
         cpu_ticks = 0
+        next_heartbeat = 0
+        next_scan = 0
+        start_ticks = Path('/proc', str(player.pid), 'stat').read_text().split(') ')[1].split()[19]
         print('A/Start: pause; B/Select: exit; D-pad: seek/volume', flush=True)
         command('show-text', 'A/Start: pause | B/Select: exit | D-pad: seek/volume', 5000)
         while player.poll() is None:
-            ready, _, _ = select.select(inputs, [], [], 0.1)
+            if time.monotonic() >= next_scan:
+                rescan_inputs()
+                next_scan = time.monotonic() + 2
+            ready, _, _ = select.select(list(inputs.values()), [], [], 0.1)
             for fd in ready:
-                data = os.read(fd, event.size * 64)
+                try:
+                    data = os.read(fd, event.size * 64)
+                except OSError:
+                    data = b''
+                if not data:
+                    node = next(node for node, current in inputs.items() if current == fd)
+                    os.close(fd)
+                    del inputs[node]
+                    continue
                 for offset in range(0, len(data), event.size):
                     _, _, kind, code, value = event.unpack_from(data, offset)
                     if kind == 1 and value == 1:
@@ -97,6 +126,16 @@ def main():
                             command('seek', 10 * value, 'relative')
                         elif code == 17:
                             command('add', 'volume', -5 * value)
+            if time.monotonic() >= next_heartbeat:
+                if command('get_property', 'pause'):
+                    playing.unlink(missing_ok=True)
+                else:
+                    heartbeat = {'pid': player.pid, 'start_ticks': start_ticks,
+                                 'updated': time.monotonic()}
+                    temporary = playing.with_suffix('.tmp')
+                    temporary.write_text(json.dumps(heartbeat))
+                    temporary.replace(playing)
+                next_heartbeat = time.monotonic() + 1
             if time.monotonic() >= next_sample:
                 stats = {key: command('get_property', key) for key in (
                     'time-pos', 'pause', 'frame-drop-count',
@@ -115,7 +154,7 @@ def main():
                 print(json.dumps(stats), flush=True)
                 next_sample = time.monotonic() + 5
         return player.returncode
-    except EOFError:
+    except (EOFError, BrokenPipeError, ConnectionResetError):
         return player.wait()
     finally:
         if player.poll() is None:
@@ -126,9 +165,10 @@ def main():
                 player.kill()
                 player.wait()
         sock.close()
-        for fd in inputs:
+        for fd in inputs.values():
             os.close(fd)
         Path(ipc).unlink(missing_ok=True)
+        playing.unlink(missing_ok=True)
 
 
 if __name__ == '__main__':

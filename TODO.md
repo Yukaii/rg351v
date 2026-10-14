@@ -23,8 +23,8 @@ Open work and what is already done. Facts learned along the way go in
 
 - [x] Playback prototype: cached and direct YouTube 360p H.264, SDL output,
   on-device extraction, gamepad controls and measurements
-- [ ] Full extraction support (JavaScript runtime), search and browsing UI
-- [ ] Playback-aware autosleep for long videos without SSH
+- [x] QuickJS JavaScript challenge support and playback-aware autosleep
+- [ ] Search and browsing UI
 
 ## Done
 

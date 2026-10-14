@@ -59,7 +59,7 @@ matching heading (or a new one), with the date when it is a measurement.
   `/dev/input/event*` (the gamepad re-enumerates on every resume, so it
   rescans), ignores stick jitter below 10% of the axis range, and holds off
   while charging, with an SSH session open, with Wi-Fi above 20 KB/s, or while
-  music plays. While installed, the device suspends ~5 min after the last
+  music or video plays. While installed, the device suspends ~5 min after the last
   button press, so SSH from the Mac drops until the power key wakes it.
 - The RTC (`rk808-rtc`, `/sys/class/rtc/rtc0/wakealarm`) wakes the board from
   suspend, which makes unattended tests possible:
@@ -123,6 +123,34 @@ matching heading (or a new one), with the date when it is a measurement.
   cached playback and IPC pause/seek/resume worked again, with zero drops.
   Steady samples used ~50% of one core and ~496-503 mA; a seek interval briefly
   reached ~67% and ~685 mA.
+- JavaScript support (2026-10-14): upstream QuickJS-NG 0.17.0 Linux/aarch64
+  binary runs on AmberELEC and occupies ~2.4 MB. Its release SHA-256 is pinned
+  in `youtube.sh`. The yt-dlp zip already includes compatible EJS solver code;
+  `--js-runtimes quickjs:/storage/roms/ports/youtube/qjs` enables it explicitly.
+  Recognition removes the missing-runtime warning, but cannot fix client-side
+  access restrictions or missing formats. Forcing web_safari yielded only
+  storyboards on the test video; forcing tv on another video was rejected.
+  The bundled EJS solver transformed an `n` test challenge using current player
+  `22cb88bc` code both in ARM64 Docker and on the handheld. This checks the
+  solver/runtime path; the test string was synthetic, not a stream URL.
+- Video autosleep inhibition uses an atomic JSON heartbeat with the mpv PID,
+  Linux process start ticks and monotonic update time. Pausing removes it.
+  The watcher rejects markers >=15 s old and mismatched/dead processes, so
+  crashes and PID reuse cannot keep the device awake indefinitely. On-device
+  active/pause/resume/exit checks and stale/reused/dead/invalid-marker checks
+  passed. The controller reader now rescans after USB re-enumeration.
+- Measured (2026-10-14): a six-minute repeated cached clip, detached with SSH
+  closed, reached 357.9 s in the last periodic sample with zero renderer and
+  decoder drops, then finished. Charging was active at the final check, so
+  that run alone does not prove inhibition. A separate on-device watcher test
+  disabled charging/SSH/network blockers, used a short idle threshold and
+  captured the suspend command: playing blocked it, pausing requested sleep,
+  and resume restored the heartbeat. System configuration stayed at 5 minutes.
+  After reboot, QuickJS 0.17.0 and the upgraded watcher persisted; active,
+  pause, resume and exit heartbeat checks passed again.
+- mpv can close IPC between the wrapper's process check and next request at
+  natural EOF. Treat broken/reset connections like EOF, wait for its exit
+  status and clean up the marker; natural EOF was retested successfully.
 
 ## Storage, EmulationStation and ports
 

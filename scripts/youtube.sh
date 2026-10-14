@@ -48,8 +48,18 @@ install)
     exit 1
   }
   "${SCP[@]}" "$LOCAL/test-360p.mp4" "$LOCAL/yt-dlp" "$HERE/device/youtube-player.py" "$HOST:$REMOTE/"
+  if [[ ! -s "$LOCAL/qjs" ]]; then
+    curl -fL --silent --show-error \
+      https://github.com/quickjs-ng/quickjs/releases/download/v0.17.0/qjs-linux-aarch64 \
+      -o "$LOCAL/qjs"
+  fi
+  [[ "$(shasum -a 256 "$LOCAL/qjs" | awk '{print $1}')" == 3372133484edf50a69f3c67903af41206d22a061e930e3cfb63269272ef56d2e ]] || {
+    echo "QuickJS checksum mismatch" >&2
+    exit 1
+  }
+  "${SCP[@]}" "$LOCAL/qjs" "$HOST:$REMOTE/"
   "${SCP[@]}" "$HERE/ports/youtube/launcher.sh" "$HOST:/storage/roms/ports/YouTube.sh"
-  "${SSH[@]}" "$HOST" 'chmod +x /storage/roms/ports/YouTube.sh'
+  "${SSH[@]}" "$HOST" "chmod +x /storage/roms/ports/YouTube.sh $REMOTE/qjs"
   echo "installed: Ports > YouTube (refresh the game list if needed)"
   ;;
 play)
@@ -69,6 +79,7 @@ stream)
   printf '%s\n' "$2" >"$LOCAL/url.txt"
   "${SCP[@]}" "$LOCAL/url.txt" "$HOST:$REMOTE/url.txt"
   "${SSH[@]}" "$HOST" "python3 $REMOTE/yt-dlp --no-playlist --socket-timeout 15 --dump-single-json \
+      --js-runtimes quickjs:$REMOTE/qjs \
       -f 'bestvideo[height<=360][fps<=30][vcodec^=avc1]+bestaudio[ext=m4a]/best[height<=360][fps<=30][vcodec^=avc1]' \
       --batch-file $REMOTE/url.txt > $REMOTE/stream.json"
   "${SSH[@]}" "$HOST" "systemctl stop emustation
