@@ -83,6 +83,8 @@ matching heading (or a new one), with the date when it is a measurement.
   1.7 W (~7.5 h); power-key suspend <1% drop over 69 min (<~29 mA, >100 h, at
   least 15x better than awake); SoC 49 C awake -> 36 C asleep; Wi-Fi back
   within ~15 s of resume.
+- User observation (2026-10-14): one overnight sleep used about 4% battery.
+  Exact duration and start/end readings were not recorded.
 - Tuning knobs in sysfs (all reset on reboot): cpufreq (1008/1200/1248/1296 MHz,
   governors incl. `powersave`/`schedutil`), GPU and DMC devfreq, backlight
   0-100, Wi-Fi power save (off; the mt7601u driver does not support it, `-95`).
@@ -90,6 +92,37 @@ matching heading (or a new one), with the date when it is a measurement.
   slower but ~25% less energy above idle (noisy: idle swings 420-480 mA under
   ES). Idle is unaffected because idle cores sit in WFI. 1008 MHz is the lowest
   OPP. Backlight off saves only ~21 mA at brightness 24.
+
+## YouTube and video playback
+
+- Measured (2026-10-14): stock mpv 0.35.0 / FFmpeg 4.4.1 has SDL and DRM
+  outputs but no hardware decoders or GPU contexts. `--vo=gpu
+  --gpu-context=drm` fails at option parsing. Direct `--vo=drm` works but
+  dropped 85 frames by 8.7 s and 151 by 16.7 s on a 360p/30 H.264 clip;
+  its log reports C-based YUV-to-BGRA conversion and a slow copy.
+- `SDL_VIDEODRIVER=kmsdrm --vo=sdl --input-gamepad=no` avoids those drops.
+  mpv's gamepad reader initializes SDL first; with `--input-gamepad=yes`,
+  the SDL video output refuses to open ("Another component is using SDL
+  already"). The prototype reads controller evdev events and sends mpv IPC
+  commands instead. User verified picture, sound, pause, seek and exit.
+- Measured (2026-10-14): first 15 s of a cached 360p/30 Big Buck Bunny sample
+  had zero renderer/decoder drops and ~493-504 mA discharge (45-48 C).
+  A separate SDL run sampled ~496-513 mA with zero drops. These are short
+  samples, not a battery-runtime estimate.
+- Mac-resolved Google Video URLs returned HTTP 403 from the handheld,
+  including with the extraction User-Agent. Resolving with the same yt-dlp
+  2026.08.19 on-device yielded playable URLs (curl range request HTTP 206).
+  The precise cause of the Mac/device difference is not established.
+- Direct streaming of the same 360p H.264/AAC video had zero renderer/decoder
+  drops at 8, 11 and 14 s; A/V drift was <=0.2 ms. A wrapper sample reported
+  80.6% of one core, ~598 mA and ~49.5 C. A stream reconnect warning occurred
+  in one run; longer sessions still need testing. Python 3.11 runs the 2.9 MB
+  yt-dlp zip executable, but it warns about the missing JavaScript runtime.
+  Do not assume full format/video coverage from this successful test.
+- Verified after reboot (2026-10-14): launcher, sample and extractor persisted;
+  cached playback and IPC pause/seek/resume worked again, with zero drops.
+  Steady samples used ~50% of one core and ~496-503 mA; a seek interval briefly
+  reached ~67% and ~685 mA.
 
 ## Storage, EmulationStation and ports
 

@@ -19,6 +19,13 @@ Open work and what is already done. Facts learned along the way go in
 - [ ] 16-level album art option
 - [ ] Local mp3 player (separate project, offline)
 
+### YouTube player
+
+- [x] Playback prototype: cached and direct YouTube 360p H.264, SDL output,
+  on-device extraction, gamepad controls and measurements
+- [ ] Full extraction support (JavaScript runtime), search and browsing UI
+- [ ] Playback-aware autosleep for long videos without SSH
+
 ## Done
 
 - [x] Flashed `AmberELEC-RG351V.aarch64-20230203.img` to SD1 (replaced 351ELEC)
