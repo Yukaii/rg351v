@@ -278,6 +278,40 @@ matching heading (or a new one), with the date when it is a measurement.
 - Security: while detached the holder stays logged in as your PTT account for
   up to the detach timeout; anyone who launches PTT reattaches to it.
 
+## Anki (backend feasibility)
+
+- Artifact inspection (2026-10-14): official PyPI `anki` 26.9.3 provides
+  `anki-26.9.3-cp310-abi3-manylinux_2_35_aarch64.whl` (~10.5 MB download).
+  Requires Python >=3.10; the device previously ran Python 3.11 and glibc 2.36.
+  This is the headless core, with scheduling, collection/media access and
+  AnkiWeb sync, rather than the Qt desktop package (`aqt`). Source:
+  https://pypi.org/project/anki/26.9.3/
+- Downloaded wheel SHA-256:
+  `d994c996dcb5a619049291d829500f5bb0bbae5fe36058f1d43daadd59b5b804`.
+  Its `anki/_rsbridge.so` is AArch64, ~27.5 MB uncompressed; ELF DT_NEEDED
+  entries are libgcc_s.so.1, libm.so.6, libc.so.6 and ld-linux-aarch64.so.1.
+  Embedded GLIBC symbol-version strings reach 2.34. No Qt dependency appears
+  in this native library. Wheel tags and ELF inspection alone did not establish
+  runtime compatibility; see the subsequent device checks below.
+- On-device verification (2026-10-14): the official backend runs on Python
+  3.11.1/Linux 4.4.189 without a cross-build. A disposable collection on exFAT
+  passed 12 checks: Basic note/card creation, question/answer HTML generation,
+  v3 scheduler choices, offline review/history, undo/redo, media I/O and
+  persistence after reopening. Collection checks took 0.457 s after imports.
+  The scripted prepare/deploy/probe flow also passed, then all 12 checks passed
+  again after reboot. Imports took ~3 s warm and ~12 s just after boot;
+  subsequent collection checks took ~2 s. The bundle occupies ~76 MB on exFAT
+  including bytecode. Dependencies are pinned in `apps/anki/requirements.txt`;
+  include `distro` explicitly because pip running on macOS skips its Linux-only
+  environment marker even when resolving wheels with `--platform`.
+  This does not verify AnkiWeb sync, FSRS-specific behavior or screen rendering.
+- Python source compilation stalled on protobuf's `internal/encoder.py`, with
+  a busy Python process and traceback inside `source_to_code`; compiling that
+  file alone also exceeded a 5-second timeout. Precompiling all dependencies
+  with Mac Python 3.11.11 and checked-hash bytecode resolved the import stall
+  on device Python 3.11.1. The cause in AmberELEC's compiler is not established.
+  `scripts/anki.sh prepare` performs this step; no device-side pip is needed.
+
 ## PocketJS (evaluated, not pursued)
 
 Cost (2026-10-13, `hero` demo, 960x544 raster, headless): boot ~250 ms, 19.6 MB

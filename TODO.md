@@ -28,6 +28,13 @@ Open work and what is already done. Facts learned along the way go in
   to results after playback
 - [ ] Broader streaming coverage, 480p and longer battery measurements
 
+### Anki client
+
+- [x] Find an official prebuilt aarch64 headless backend candidate (Anki 26.9.3)
+- [x] Verify backend import and collection/scheduler operations on the device
+- [ ] Verify AnkiWeb sync round-trip with a test deck, including offline reviews
+- [ ] Build a gamepad review UI with a limited card renderer
+
 ## Done
 
 - [x] Flashed `AmberELEC-RG351V.aarch64-20230203.img` to SD1 (replaced 351ELEC)
