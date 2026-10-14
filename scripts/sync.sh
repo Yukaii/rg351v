@@ -83,7 +83,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 push_to_device() {
-  local rsync_args=(-avh --omit-dir-times -e "ssh -4 -o BatchMode=yes -o ConnectTimeout=8")
+  # The ROM partition is exFAT: copy contents without Unix metadata.
+  local rsync_args=(-rLtvh --no-perms --no-owner --no-group --omit-dir-times -e "ssh -4 -o BatchMode=yes -o ConnectTimeout=8")
   [[ "$DRY_RUN" -eq 1 ]] && rsync_args+=(-n)
 
   echo "==> pushing $STAGING/ to $HOST:/storage/roms/"

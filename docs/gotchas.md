@@ -191,7 +191,9 @@ matching heading (or a new one), with the date when it is a measurement.
   editing the gamelist: ES rewrites it on quit). Ports = `/storage/roms/ports`.
 - `/storage/roms` is exFAT: no symlinks, ownership or permission bits. rsync
   there needs `-rLt --no-perms --no-owner --no-group`, and `--delete` must
-  exclude user data dirs.
+  exclude user data dirs. `sync.sh` previously used `-a`, causing receiver
+  `chown` failures and preventing the EmulationStation refresh after transfer;
+  it now uses the exFAT-compatible options.
 - No on-device Wi-Fi sync app exists; sync from the Mac with `scripts/sync.sh`.
   RetroArch saves live in `/storage/.config/retroarch/savefiles/` (plus `.srm`
   next to ROMs, since `savefiles_in_content_dir` is true), savestates in
