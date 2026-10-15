@@ -129,19 +129,23 @@ cmd_sync() {
 
 cmd_list() {
   assert_device
+  # Ship only the first bytes of each chart (BusyBox awk trips over the BOM and
+  # the titles may be Shift-JIS); decode and pick TITLE: here.
   "${SSH[@]}" "$HOST" "cd '$DEST' 2>/dev/null && find . -iname '*.tja' | sort | while IFS= read -r f; do
-      printf '%s\t%s\n' \"\$f\" \"\$(awk '/^[Tt][Ii][Tt][Ll][Ee]:/{print; exit}' \"\$f\")\"
+      printf '@@@%s\n' \"\$f\"; head -c 1500 \"\$f\"; printf '\n'
     done" |
     python3 -c '
 import sys
-for raw in sys.stdin.buffer:
-    for enc in ("utf-8", "cp932"):
+data = sys.stdin.buffer.read().split(b"@@@")
+for chunk in data[1:]:
+    path, _, head = chunk.partition(b"\n")
+    for enc in ("utf-8-sig", "cp932"):
         try:
-            line = raw.decode(enc).rstrip("\n"); break
+            text = head.decode(enc); break
         except UnicodeDecodeError:
-            line = raw.decode("latin-1").rstrip("\n")
-    path, _, title = line.partition("\t")
-    print(f"{path[2:]:<60} {title.split(":",1)[-1].strip().lstrip(chr(0xFEFF))}")
+            text = head.decode("latin-1")
+    title = next((l.split(":", 1)[1].strip() for l in text.splitlines() if l.upper().startswith("TITLE:")), "")
+    print("%-58s %s" % (path.decode("utf-8", "replace")[2:], title))
 '
 }
 
