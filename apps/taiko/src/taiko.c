@@ -87,6 +87,20 @@ static double g_latency = 0.032; /* seconds from "written" to "heard" */
 static double g_user_off;        /* judgement trim (your tap habit); NOT applied to visuals */
 static double g_vis_off = 0.020; /* draw notes this far ahead: display pipeline delay */
 
+/* Key mapping presets: which physical input is red (don) and which is blue (ka).
+ * Chosen in the menu and saved in calib.txt. */
+enum { IN_A, IN_B, IN_X, IN_Y, IN_L1, IN_R1, IN_UP, IN_DOWN, IN_LEFT, IN_RIGHT, IN_N };
+#define NKEYMAPS 2
+static const char *const KEYMAP_NAME[NKEYMAPS] = {"Classic", "Up/Y blue"};
+static const char *const KEYMAP_HELP[NKEYMAPS] = {"red: A B D-pad  blue: X Y L1 R1", "blue: UP Y  red: all others"};
+static const signed char KEYMAP_KIND[NKEYMAPS][IN_N] = {
+    /*  A        B        X        Y        L1       R1       UP       DOWN     LEFT     RIGHT */
+    {HIT_DON, HIT_DON, HIT_KA, HIT_KA, HIT_KA, HIT_KA, HIT_DON, HIT_DON, HIT_DON, HIT_DON},
+    {HIT_DON, HIT_DON, HIT_DON, HIT_KA, HIT_DON, HIT_DON, HIT_KA, HIT_DON, HIT_DON, HIT_DON},
+};
+static _Atomic int g_keymap;
+static int input_kind(int in) { return KEYMAP_KIND[atomic_load(&g_keymap)][in]; }
+
 static unsigned stat_cb, stat_se; /* audio thread; logged when a session ends */
 
 static void synth_se(void) {
@@ -208,19 +222,16 @@ static void emit_hit(int kind, double t) {
  * kernel symbol names do not match the physical buttons. */
 static int code_to_kind(int code) {
   switch (code) {
-    case 304: /* A */
-    case 305: /* B */
-      return HIT_DON;
-    case 544: /* BTN_DPAD_UP..RIGHT: the D-pad is also red */
-    case 545:
-    case 546:
-    case 547:
-      return HIT_DON;
-    case 306: /* X */
-    case 307: /* Y */
-    case 308: /* L1 */
-    case 309: /* R1 */
-      return HIT_KA;
+    case 304: return input_kind(IN_A);
+    case 305: return input_kind(IN_B);
+    case 306: return input_kind(IN_X);
+    case 307: return input_kind(IN_Y);
+    case 308: return input_kind(IN_L1);
+    case 309: return input_kind(IN_R1);
+    case 544: return input_kind(IN_UP); /* BTN_DPAD_UP..RIGHT, if a pad reports them */
+    case 545: return input_kind(IN_DOWN);
+    case 546: return input_kind(IN_LEFT);
+    case 547: return input_kind(IN_RIGHT);
     default: return -1;
   }
 }
@@ -269,7 +280,10 @@ static void *input_thread(void *arg) {
           else kind = code_to_kind(ev[k].code);
         } else if (ev[k].type == EV_ABS && (ev[k].code == ABS_HAT0X || ev[k].code == ABS_HAT0Y)) {
           int ax = ev[k].code == ABS_HAT0Y;
-          if (ev[k].value != 0 && hat[ax] == 0) kind = HIT_DON;
+          if (ev[k].value != 0 && hat[ax] == 0) {
+            int in = ax ? (ev[k].value < 0 ? IN_UP : IN_DOWN) : (ev[k].value < 0 ? IN_LEFT : IN_RIGHT);
+            kind = input_kind(in);
+          }
           hat[ax] = ev[k].value;
         }
         if (kind < 0 || autoplay) continue;
@@ -1242,7 +1256,7 @@ static void set_offset(int ms) {
 static void save_offset(void) {
   FILE *f = fopen(calib_path, "w");
   if (f) {
-    fprintf(f, "%d %d\n", g_offset_ms, (int)lround(g_vis_off * 1000.0));
+    fprintf(f, "%d %d %d\n", g_offset_ms, (int)lround(g_vis_off * 1000.0), atomic_load(&g_keymap));
     fclose(f);
   }
 }
@@ -1300,16 +1314,16 @@ static void audio_stop(SDL_AudioStream *as) {
 /* Hits from the SDL gamepad when no evdev device is available. */
 static int sdl_hit_kind(int b) {
   switch (b) {
-    case SDL_GAMEPAD_BUTTON_SOUTH:
-    case SDL_GAMEPAD_BUTTON_EAST:
-    case SDL_GAMEPAD_BUTTON_DPAD_UP:
-    case SDL_GAMEPAD_BUTTON_DPAD_DOWN:
-    case SDL_GAMEPAD_BUTTON_DPAD_LEFT:
-    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return HIT_DON;
-    case SDL_GAMEPAD_BUTTON_WEST:
-    case SDL_GAMEPAD_BUTTON_NORTH:
-    case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER:
-    case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return HIT_KA;
+    case SDL_GAMEPAD_BUTTON_SOUTH: return input_kind(IN_A);
+    case SDL_GAMEPAD_BUTTON_EAST: return input_kind(IN_B);
+    case SDL_GAMEPAD_BUTTON_WEST: return input_kind(IN_X);
+    case SDL_GAMEPAD_BUTTON_NORTH: return input_kind(IN_Y);
+    case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: return input_kind(IN_L1);
+    case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return input_kind(IN_R1);
+    case SDL_GAMEPAD_BUTTON_DPAD_UP: return input_kind(IN_UP);
+    case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return input_kind(IN_DOWN);
+    case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return input_kind(IN_LEFT);
+    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return input_kind(IN_RIGHT);
     default: return -1;
   }
 }
@@ -1757,7 +1771,16 @@ static void draw_menu(SDL_Renderer *ren, int sel, int top, int rows, int items, 
       utext_o(ren, x_list, y + ty, "[ Calibration ]", 2, 150, 255, 170, 10, 70, 30, 255);
       continue;
     }
-    const Song *s = &songs[it - 1];
+    if (it == 1) {
+      int km = atomic_load(&g_keymap);
+      char kl[64];
+      snprintf(kl, sizeof kl, "[ Keys: %s ]", KEYMAP_NAME[km]);
+      utext_o(ren, x_list, y + ty, kl, 2, 255, 224, 120, 90, 50, 0, 255);
+      utext_o(ren, SCR_W - 16 - utext_w(ren, KEYMAP_HELP[km], 1), y + by + 3, KEYMAP_HELP[km], 1, 255, 255, 255, 14,
+              22, 58, 255);
+      continue;
+    }
+    const Song *s = &songs[it - 2];
     int maxw = x_badge - x_list - 12;
     if (it == sel && utext_w(ren, s->label, 2) > maxw) {
       /* the selected title scrolls instead of being cut off */
@@ -1773,7 +1796,7 @@ static void draw_menu(SDL_Renderer *ren, int sel, int top, int rows, int items, 
                 it == sel ? 255 : 235);
     }
     /* fixed-width course column: it can never be covered by a title */
-    int id = s->ids[cidx[it - 1]];
+    int id = s->ids[cidx[it - 2]];
     const TjaCourse *c = tja_course(&s->tja, id);
     int R, G, B;
     course_rgb(id, &R, &G, &B);
@@ -1788,13 +1811,13 @@ static void draw_menu(SDL_Renderer *ren, int sel, int top, int rows, int items, 
   if (n_songs == 0) utext_o(ren, 20, 110, "no songs found", 2, 255, 255, 255, 14, 22, 58, 255);
   col(ren, 14, 22, 58, 215);
   rect(ren, 0, SCR_H - 26, SCR_W, 26);
-  utext(ren, 12, SCR_H - 22, "UP/DOWN song   LEFT/RIGHT course   A play   SELECT+START quit", 1, 214, 220, 240, 255);
+  utext(ren, 12, SCR_H - 22, "UP/DOWN select   LEFT/RIGHT course or keys   A play   SELECT+START quit", 1, 214, 220, 240, 255);
 }
 
 static Choice menu_run(SDL_Renderer *ren, int *sel_io, int *cidx) {
   Choice ch = {0, 0, -1, 0};
   int sel = *sel_io, top = 0, bsel = 0, bstart = 0;
-  int items = n_songs + 1; /* item 0 = calibration */
+  int items = n_songs + 2; /* item 0 = calibration, 1 = key mapping, then songs */
   const int rows = 10;
   while (!quit_flag) {
     SDL_Event e;
@@ -1809,15 +1832,24 @@ static Choice menu_run(SDL_Renderer *ren, int *sel_io, int *cidx) {
       if (!down) continue;
       if (b == SDL_GAMEPAD_BUTTON_DPAD_UP && sel > 0) sel--;
       else if (b == SDL_GAMEPAD_BUTTON_DPAD_DOWN && sel < items - 1) sel++;
-      else if ((b == SDL_GAMEPAD_BUTTON_DPAD_LEFT || b == SDL_GAMEPAD_BUTTON_DPAD_RIGHT) && sel > 0) {
-        Song *s = &songs[sel - 1];
+      else if ((b == SDL_GAMEPAD_BUTTON_DPAD_LEFT || b == SDL_GAMEPAD_BUTTON_DPAD_RIGHT) && sel == 1) {
         int d = b == SDL_GAMEPAD_BUTTON_DPAD_RIGHT ? 1 : -1;
-        cidx[sel - 1] = (cidx[sel - 1] + d + s->n_ids) % s->n_ids;
+        atomic_store(&g_keymap, (atomic_load(&g_keymap) + d + NKEYMAPS) % NKEYMAPS);
+        save_offset();
+      } else if ((b == SDL_GAMEPAD_BUTTON_DPAD_LEFT || b == SDL_GAMEPAD_BUTTON_DPAD_RIGHT) && sel > 1) {
+        Song *s = &songs[sel - 2];
+        int d = b == SDL_GAMEPAD_BUTTON_DPAD_RIGHT ? 1 : -1;
+        cidx[sel - 2] = (cidx[sel - 2] + d + s->n_ids) % s->n_ids;
       } else if (b == SDL_GAMEPAD_BUTTON_SOUTH) {
+        if (sel == 1) { /* A also cycles the key mapping */
+          atomic_store(&g_keymap, (atomic_load(&g_keymap) + 1) % NKEYMAPS);
+          save_offset();
+          continue;
+        }
         if (sel == 0) ch.calibrate = 1;
         else {
-          ch.song = sel - 1;
-          ch.course_id = songs[sel - 1].ids[cidx[sel - 1]];
+          ch.song = sel - 2;
+          ch.course_id = songs[sel - 2].ids[cidx[sel - 2]];
         }
         *sel_io = sel;
         return ch;
@@ -1890,10 +1922,11 @@ int main(int argc, char **argv) {
   if (bp) snprintf(calib_path, sizeof calib_path, "%scalib.txt", bp);
   FILE *cf = fopen(calib_path, "r");
   if (cf) {
-    int ms = 0, vis = 0;
-    int n = fscanf(cf, "%d %d", &ms, &vis);
+    int ms = 0, vis = 0, km = 0;
+    int n = fscanf(cf, "%d %d %d", &ms, &vis, &km);
     if (n >= 1) set_offset(ms);
     if (n >= 2) g_vis_off = vis / 1000.0;
+    if (n >= 3 && km >= 0 && km < NKEYMAPS) atomic_store(&g_keymap, km);
     fclose(cf);
   }
 
@@ -1967,7 +2000,7 @@ int main(int argc, char **argv) {
     qsort(songs, (size_t)n_songs, sizeof *songs, cmp_song);
     fprintf(stderr, "taiko: %d songs in %s\n", n_songs, songs_dir);
     int *cidx = calloc((size_t)(n_songs ? n_songs : 1), sizeof(int));
-    int sel = n_songs ? 1 : 0;
+    int sel = n_songs ? 2 : 0;
     if (getenv("TAIKO_MENU_SEL")) sel = atoi(getenv("TAIKO_MENU_SEL"));
     if (screen && !strcmp(screen, "calibrate")) calibrate_run(ren);
     else
