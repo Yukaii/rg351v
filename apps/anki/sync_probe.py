@@ -105,7 +105,8 @@ def main():
     require(name == "RG351V", f"refusing device writes to {name}")
     here = Path(__file__).resolve().parent
     subprocess.run(["scp", "-4", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-                    str(here / "sync_client.py"), str(here / "sync_cli.py"), str(here / "sync_probe.py"),
+                    str(here / "sync_client.py"), str(here / "sync_cli.py"),
+                    str(here / "collection_access.py"), str(here / "sync_probe.py"),
                     f"{host}:{RUNTIME}/"], check=True)
 
     def phase(action, **kwargs):
@@ -222,6 +223,17 @@ def main():
             require((work / "auth.bin").stat().st_mode & 0o777 == 0o600, "private auth file")
             require((work / "auth.bak").exists(), "auth file backed up")
             print("PASS terminal status/sync, private token storage and token backup", flush=True)
+            from review_backend import Session
+            session = Session(work / "desktop", work / "auth.bin")
+            try:
+                session.choose(deck_id)
+                state = session.sync(lambda _: None)
+                require(state["view"] == "decks", "UI sync returns to deck selection")
+                require(session.card is None and session.undo_step is None,
+                        "UI sync discards stale card and undo state")
+            finally:
+                session.close()
+            print("PASS review UI backend sync and scheduler-state invalidation", flush=True)
         finally:
             try:
                 if col is not None:

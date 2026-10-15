@@ -366,6 +366,22 @@ matching heading (or a new one), with the date when it is a measurement.
   token authenticated successfully and collection/media sync both completed
   without another full download.
 
+
+- Reviewer verified (2026-10-15): Python/ctypes uses the stock SDL2/KMSDRM and
+  SDL2_image libraries, with shared Unifont bitmap text and mpv local audio.
+  Host previews and SDL framebuffer captures verified CJK, image placement,
+  scrolling and answer controls; the user confirmed Homebrew launch and reviews.
+  Automated grading/undo tests use disposable collections, never the real account.
+- Homebrew launcher arguments (2026-10-15): EmulationStation appends
+  `-Phomebrew --core= --emulator= --controllers= ...`. Passing those to the UI's
+  argparse caused an immediate exit. The launcher discards firmware arguments
+  when the first argument starts with `-P`, preserving explicit demo/test flags.
+  Startup logs are in `/tmp/logs/anki-launcher.log` and `/tmp/logs/anki-ui.log`.
+- Native rating intervals contain Unicode FSI/PDI formatting characters. Skip
+  Unicode category Cf when measuring and drawing bitmap text, or these invisible
+  controls appear as boxes. The UI and terminal CLI also share a profile lock;
+  close the reviewer before running terminal sync against the same collection.
+
 ## PocketJS (evaluated, not pursued)
 
 Cost (2026-10-13, `hero` demo, 960x544 raster, headless): boot ~250 ms, 19.6 MB

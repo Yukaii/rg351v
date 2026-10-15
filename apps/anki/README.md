@@ -1,8 +1,62 @@
-# Anki client (backend prototype)
+# Anki client
 
-The official prebuilt headless Anki backend runs on the RG351V. The planned
-client uses upstream collection storage, scheduling and AnkiWeb sync, with a
-custom gamepad UI and a limited card renderer. There is no review UI yet.
+Gamepad flashcard reviewer using the official Anki backend for collection
+storage, scheduling and AnkiWeb sync, with a small Python/SDL2 card renderer.
+Launch **Homebrew → Anki** on the handheld.
+
+## Install and controls
+
+```sh
+bash scripts/anki.sh prepare
+bash scripts/anki.sh install
+bash scripts/anki.sh login
+bash scripts/anki.sh sync --full download  # first download only
+```
+
+`install` adds the Homebrew entry and uses the shared Unifont bitmap at
+`.storage/ptterm-data/unifont.bin`. `deploy` updates the runtime without
+restarting EmulationStation. Close Anki before terminal sync or installation.
+The UI and terminal client hold an exclusive profile lock.
+
+| Control | Action |
+| --- | --- |
+| D-pad | Choose deck; scroll card (left/right page) |
+| A | Study deck; reveal answer; Good |
+| X / B / Y on answer | Again / Hard / Easy |
+| L1 | Undo the last review |
+| R1 | Replay local card audio |
+| SELECT | Return to deck list; exit from deck list |
+| START on deck list | Sync collection and media with AnkiWeb |
+| B while syncing | Cancel sync |
+
+Reviews save locally immediately. Sync is manual: return to the deck list and
+press START; the header shows `SYNC HH:MM` after success. Then sync your other
+Anki client. Offline reviewing works normally. Sync errors leave a message and
+the `LOCAL` label. Full-sync decisions remain in the terminal client.
+
+The renderer supports CJK bitmap text, basic/cloze cards, paragraphs, emphasis,
+ruby readings, scrolling, local images and sound tags. It does not run custom
+CSS/JavaScript, typed-answer widgets, TTS or video, and does not shape RTL text.
+It uses upstream rendered question/answer HTML and native rating intervals.
+Input is gated briefly after reveal to avoid an accidental double-press grade.
+
+`bash scripts/anki.sh demo` opens a separate sample collection with sync disabled.
+The UI refreshes scheduling after detected suspend/resume and rescans input
+devices; hardware suspend/resume still needs a dedicated verification.
+
+Host previews (no collection access) and regression checks:
+
+```sh
+python3 apps/anki/anki-ui.py --font .storage/ptterm-data/unifont.bin \
+  --preview answer --dump .storage/anki-answer.png
+.storage/anki-host/bin/python -m unittest discover -s apps/anki -p 'test_*.py'
+```
+
+Verified on 2026-10-15: host previews, captured SDL output on the handheld,
+demo reveal/rate/undo/scroll flow, and user-confirmed Homebrew launch, real
+reviews and manual sync. All 12 host regression tests passed. The additional
+local-server UI-sync check could not run in the final pass because device SSH
+timed out. Automated review tests use disposable collections.
 
 ## Reproduce the offline check
 
@@ -99,11 +153,6 @@ left one synthetic review record; existing review records were not modified.
 Use the disposable local-server test for future automated review tests, so those
 records stay out of a real account. Do not force a full upload just to erase a
 test review from all clients.
-
-## Next milestones
-
-1. Build the deck picker and question/answer UI, with four physical rating buttons.
-2. Add undo, scrolling, media playback and suspend/resume handling.
 
 Keep credentials and real collections outside git. The upstream backend is
 AGPL-3.0-or-later; retain its license/source obligations when distributing.

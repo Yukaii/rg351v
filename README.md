@@ -12,7 +12,7 @@ repo is the Mac side plus the apps cross-built for the device.
 | **Auto-suspend** | suspends after 5 idle minutes unless charging, SSH, busy Wi-Fi, music or video |
 | **ptterm** | tiny SDL3 BBS terminal for PTT with an on-screen keyboard |
 | **YouTube** | Homebrew browser with search, thumbnails, saved videos and 360p playback ([usage](apps/youtube/README.md)) |
-| **Anki** | Headless backend with verified AnkiWeb collection/media/review sync; gamepad UI planned ([usage](apps/anki/README.md)) |
+| **Anki** | Gamepad flashcard reviewer with offline reviews and manual AnkiWeb collection/media sync ([usage](apps/anki/README.md)) |
 | **Ports / homebrew** | Pikachu Volleyball, KOReader built or repackaged for KMSDRM |
 | **Sync** | games from RomM, save backup/restore, Wi-Fi network memory |
 | **Monitoring** | perf snapshot, battery sampler, CPU/GPU/backlight tuning |

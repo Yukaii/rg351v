@@ -12,6 +12,7 @@ from anki.collection import Collection
 from anki.sync import SyncAuth
 
 from sync_client import FullSyncRequired, sync_collection
+from collection_access import acquire_profile
 
 
 def save_auth(filename, auth):
@@ -40,6 +41,7 @@ def main():
     sync.add_argument("--full", choices=("download", "upload"))
     args = parser.parse_args()
     args.data_dir.mkdir(parents=True, exist_ok=True)
+    lock = acquire_profile(args.data_dir)
     col = Collection(str(args.data_dir / "collection.anki2"))
     try:
         if args.command == "login":
@@ -75,6 +77,7 @@ def main():
                 print(json.dumps(result))
     finally:
         col.close()
+        lock.close()
 
 
 if __name__ == "__main__":

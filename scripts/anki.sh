@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Prebuilt headless Anki backend, disposable probes, and terminal sync.
-# Usage: scripts/anki.sh prepare | deploy | probe | probe-sync | login | status
+# Anki gamepad reviewer, prebuilt backend, disposable probes, and terminal sync.
+# Usage: scripts/anki.sh prepare | deploy | install | ui | demo
+#        scripts/anki.sh probe | probe-sync | login | status
 #        scripts/anki.sh sync [--full download|upload]
 set -euo pipefail
 
@@ -27,7 +28,7 @@ prepare)
     --invalidation-mode checked-hash \
     -s "$LOCAL/site-packages" -p "$REMOTE/site-packages" "$LOCAL/site-packages"
   ;;
-deploy | probe)
+deploy | probe | install)
   [[ -f "$LOCAL/site-packages/anki/_rsbridge.so" ]] || {
     echo "run scripts/anki.sh prepare first" >&2
     exit 1
@@ -36,11 +37,34 @@ deploy | probe)
   "${SSH[@]}" "$HOST" "mkdir -p $REMOTE"
   tar -C "$LOCAL" -czf - site-packages |
     "${SSH[@]}" "$HOST" "tar -xzf - -C $REMOTE"
-  "${SCP[@]}" "$ROOT/apps/anki/"{probe,sync_client,sync_cli,sync_probe}.py "$HOST:$REMOTE/"
+  uv run --python 3.11 --no-project python -m compileall -q \
+    --invalidation-mode checked-hash -s "$ROOT/apps/anki" -p "$REMOTE" "$ROOT/apps/anki"
+  "${SCP[@]}" "$ROOT/apps/anki/"*.py "$HOST:$REMOTE/"
+  tar -C "$ROOT/apps/anki" -czf - __pycache__ |
+    "${SSH[@]}" "$HOST" "tar -xzf - -C $REMOTE"
+  if [[ "$1" == install ]]; then
+    "${SCP[@]}" "$ROOT/.storage/ptterm-data/unifont.bin" "$HOST:$REMOTE/"
+    "${SCP[@]}" "$HERE/ports/anki/launcher.sh" "$HOST:/storage/roms/homebrew/Anki.sh"
+    "${SCP[@]}" "$HERE/device/gamelist-set.py" "$HOST:/tmp/anki-gamelist.py"
+    "${SSH[@]}" "$HOST" "chmod +x /storage/roms/homebrew/Anki.sh
+      systemctl stop emustation
+      trap 'systemctl start emustation' EXIT
+      cp -p /storage/roms/homebrew/gamelist.xml /storage/roms/homebrew/gamelist.xml.bak-anki
+      python3 /tmp/anki-gamelist.py /storage/roms/homebrew/gamelist.xml ./Anki.sh Anki \
+        'Offline flashcards with AnkiWeb sync. A: reveal/good; X: again; B: hard; Y: easy; L1: undo; R1: audio; SELECT: back.' rg351v"
+  fi
   if [[ "$1" == probe ]]; then
     "${SSH[@]}" "$HOST" \
       "timeout -s KILL 45 env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$REMOTE/site-packages python3 $REMOTE/probe.py"
   fi
+  ;;
+ui | demo)
+  assert_device
+  extra=""
+  [[ "$1" != demo ]] || extra=" --demo"
+  "${SSH[@]}" "$HOST" "systemctl stop emustation
+    trap 'systemctl start emustation' EXIT
+    bash /storage/roms/homebrew/Anki.sh$extra"
   ;;
 probe-sync)
   [[ -x "$ROOT/.storage/anki-host/bin/python" ]] ||
@@ -68,7 +92,7 @@ login | status | sync)
   fi
   ;;
 *)
-  echo "usage: ${0##*/} prepare | deploy | probe | probe-sync | login | status | sync [--full download|upload]" >&2
+  echo "usage: ${0##*/} prepare | deploy | install | ui | demo | probe | probe-sync | login | status | sync [--full download|upload]" >&2
   exit 1
   ;;
 esac
