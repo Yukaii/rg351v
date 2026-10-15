@@ -494,6 +494,15 @@ frames, slow frames with their stages) to `/tmp/logs/taiko.log` per session.
   audio starts.
 - Not the cause: DDR frequency scaling (`/sys/class/devfreq/dmc`, 0 transitions
   during runs; `performance` governor gave the same numbers) or the CPU governor.
+- A real 255 s session (Blue Zenith, manual play) showed 5805 frames with
+  p99 16.7 ms but one burst of three 83-100 ms stalls at song 40 s, together
+  with three ALSA underruns: a system-wide ~100 ms stall, not a render problem.
+  Not reproduced by forcing it: DDR switches 528<->786 MHz mid-song (4
+  transitions, 0 slow frames), a Wi-Fi scan, `sync`, 20 MB writes to
+  /storage and /storage/roms, battery reads, `journalctl --rotate` (2278
+  frames, max 16.8 ms). The app now samples per-process CPU ticks every 250 ms
+  and logs `STALL <ms> at song <t>; cpu ticks by process: ...` when a frame
+  takes > 34 ms, so the next occurrence names its source.
 - Occasional single 100 ms stalls right after `systemctl stop emustation`
   (within ~5 s) did not reproduce when waiting 8 s first; when launched from the
   menu the song starts well after ES has stopped.

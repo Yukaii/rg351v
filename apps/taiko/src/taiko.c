@@ -1328,6 +1328,87 @@ static int sdl_hit_kind(int b) {
   }
 }
 
+/* ---- stall forensics ---------------------------------------------------- */
+/* A 100 ms system-wide stall (display and audio together) was seen once in a
+ * real session and could not be reproduced on demand. Every 250 ms the CPU
+ * time of all processes is sampled (about 1 ms); when a frame takes > 34 ms the
+ * busiest ones over that window are logged, so the next occurrence names the
+ * culprit. */
+typedef struct {
+  int pid;
+  char comm[20];
+  unsigned long ticks;
+} ProcTicks;
+#define PW_MAX 600
+static ProcTicks pw_a[PW_MAX], pw_b[PW_MAX];
+static ProcTicks *pw_prev = pw_a, *pw_cur = pw_b;
+static int pw_nprev, pw_ncur;
+static uint64_t pw_next_ns;
+
+static void pw_sample(void) {
+  ProcTicks *t = pw_prev;
+  pw_prev = pw_cur;
+  pw_nprev = pw_ncur;
+  pw_cur = t;
+  pw_ncur = 0;
+  DIR *d = opendir("/proc");
+  if (!d) return;
+  struct dirent *de;
+  while ((de = readdir(d)) && pw_ncur < PW_MAX) {
+    if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
+    char path[300], buf[512];
+    snprintf(path, sizeof path, "/proc/%s/stat", de->d_name);
+    FILE *f = fopen(path, "r");
+    if (!f) continue;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    char *lp = strchr(buf, '('), *rp = strrchr(buf, ')');
+    if (!lp || !rp) continue;
+    ProcTicks *e = &pw_cur[pw_ncur];
+    e->pid = atoi(de->d_name);
+    size_t cl = (size_t)(rp - lp - 1);
+    if (cl >= sizeof e->comm) cl = sizeof e->comm - 1;
+    memcpy(e->comm, lp + 1, cl);
+    e->comm[cl] = 0;
+    unsigned long ut = 0, st = 0;
+    /* fields after ") ": state ppid pgrp session tty tpgid flags minflt cminflt majflt cmajflt utime stime */
+    if (sscanf(rp + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu", &ut, &st) != 2) continue;
+    e->ticks = ut + st;
+    pw_ncur++;
+  }
+  closedir(d);
+}
+
+static void pw_report(double gap_ms, double song_t) {
+  struct {
+    int idx;
+    unsigned long delta;
+  } top[3] = {{-1, 0}, {-1, 0}, {-1, 0}};
+  for (int i = 0; i < pw_ncur; i++) {
+    unsigned long prev = 0;
+    for (int j = 0; j < pw_nprev; j++)
+      if (pw_prev[j].pid == pw_cur[i].pid) {
+        prev = pw_prev[j].ticks;
+        break;
+      }
+    unsigned long delta = pw_cur[i].ticks >= prev ? pw_cur[i].ticks - prev : 0;
+    for (int k = 0; k < 3; k++)
+      if (delta > top[k].delta) {
+        for (int m = 2; m > k; m--) top[m] = top[m - 1];
+        top[k].idx = i;
+        top[k].delta = delta;
+        break;
+      }
+  }
+  char line[300];
+  size_t o = (size_t)snprintf(line, sizeof line, "taiko: STALL %.0f ms at song %.2fs; cpu ticks (10 ms) by process:", gap_ms, song_t);
+  for (int k = 0; k < 3 && top[k].idx >= 0 && o < sizeof line - 40; k++)
+    o += (size_t)snprintf(line + o, sizeof line - o, " %s(%d)+%lu", pw_cur[top[k].idx].comm, pw_cur[top[k].idx].pid,
+                          top[k].delta);
+  fprintf(stderr, "%s\n", line);
+}
+
 /* ---- frame timing ------------------------------------------------------- */
 /* Logged per session: with vsync a healthy frame is ~16.7 ms; "late" counts
  * frames whose interval exceeded 20 ms (a missed vsync). cpu = time spent
@@ -1426,6 +1507,16 @@ static int play_run(SDL_Renderer *ren, const Tja *tja, const char *tja_path, con
   atomic_store(&offset_req_ms, 0);
   while (!quit_flag) {
     uint64_t frame_t0 = mono_ns();
+    if (ft && ft->last_start) {
+      double gap = (double)(frame_t0 - ft->last_start) / 1e6;
+      if (gap > 34.0 && !result) {
+        pw_sample();
+        pw_report(gap, song_time(frame_t0));
+      } else if (frame_t0 >= pw_next_ns) {
+        pw_sample();
+        pw_next_ns = frame_t0 + 250000000ull;
+      }
+    }
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
       if (e.type == SDL_EVENT_QUIT) quit_flag = 1;
