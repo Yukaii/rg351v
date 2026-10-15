@@ -26,7 +26,7 @@ int main(int argc, char **argv) {
   if (argc >= 4 && !strcmp(argv[2], "--notes")) notes_id = atoi(argv[3]);
 
   printf("title=%s | %s\nwave=%s bpm=%.2f offset=%.3f%s\n", t.title, t.subtitle, t.wave, t.bpm, t.offset,
-         t.bad_utf8 ? " [NOT UTF-8]" : "");
+         t.bad_utf8 ? " [converted from Shift-JIS]" : "");
   for (size_t ci = 0; ci < t.n_courses; ci++) {
     const TjaCourse *c = &t.courses[ci];
     size_t cnt[10] = {0};

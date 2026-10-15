@@ -70,7 +70,7 @@ typedef struct {
   int songvol, sevol;
   TjaCourse *courses;
   size_t n_courses;
-  int bad_utf8; /* text was not valid UTF-8 (likely Shift-JIS): convert first */
+  int bad_utf8; /* text was not UTF-8 and was converted from Shift-JIS (CP932) */
 } Tja;
 
 /* Both return 0 on success, -1 with a message in err. */

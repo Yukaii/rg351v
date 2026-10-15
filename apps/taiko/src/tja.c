@@ -1,5 +1,7 @@
 #include "tja.h"
 
+#include "cp932_table.h"
+
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -68,6 +70,59 @@ static int utf8_valid(const unsigned char *s, size_t n) {
     i += k + 1;
   }
   return 1;
+}
+
+static size_t put_utf8(char *o, uint32_t cp) {
+  if (cp < 0x80) {
+    o[0] = (char)cp;
+    return 1;
+  }
+  if (cp < 0x800) {
+    o[0] = (char)(0xC0 | (cp >> 6));
+    o[1] = (char)(0x80 | (cp & 0x3F));
+    return 2;
+  }
+  o[0] = (char)(0xE0 | (cp >> 12));
+  o[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+  o[2] = (char)(0x80 | (cp & 0x3F));
+  return 3;
+}
+
+/* Shift-JIS (CP932) -> UTF-8. Unmappable bytes become '?'. Caller frees. */
+static char *cp932_to_utf8(const unsigned char *s, size_t n, size_t *out_len) {
+  char *o = malloc(n * 3 + 1);
+  if (!o) exit(1);
+  size_t k = 0;
+  for (size_t i = 0; i < n;) {
+    unsigned c = s[i];
+    if (c < 0x80) {
+      o[k++] = (char)c;
+      i++;
+    } else if (c >= 0xA1 && c <= 0xDF) { /* half-width katakana */
+      k += put_utf8(o + k, 0xFF61u + (c - 0xA1));
+      i++;
+    } else if (((c >= 0x81 && c <= 0x9F) || (c >= 0xE0 && c <= 0xFC)) && i + 1 < n) {
+      unsigned t = s[i + 1];
+      unsigned cp = 0;
+      if (t >= 0x40 && t <= 0xFC) {
+        unsigned li = c <= 0x9F ? c - 0x81 : c - 0xE0 + 31;
+        cp = cp932_table[li * CP932_TRAILS + (t - 0x40)];
+      }
+      if (cp) {
+        k += put_utf8(o + k, cp);
+        i += 2;
+      } else {
+        o[k++] = '?';
+        i += (t >= 0x40) ? 2 : 1;
+      }
+    } else {
+      o[k++] = '?';
+      i++;
+    }
+  }
+  o[k] = 0;
+  *out_len = k;
+  return o;
 }
 
 static void set_str(char *dst, size_t cap, const char *src) {
@@ -220,7 +275,15 @@ int tja_parse(Tja *t, const char *text, size_t len, char *err, size_t errsz) {
     text += 3;
     len -= 3;
   }
-  t->bad_utf8 = !utf8_valid((const unsigned char *)text, len);
+  /* Old charts are Shift-JIS: convert so the rest of the parser sees UTF-8 */
+  char *converted = NULL;
+  if (!utf8_valid((const unsigned char *)text, len)) {
+    size_t cl;
+    converted = cp932_to_utf8((const unsigned char *)text, len, &cl);
+    text = converted;
+    len = cl;
+    t->bad_utf8 = 1;
+  }
 
   P p;
   memset(&p, 0, sizeof p);
@@ -356,6 +419,7 @@ int tja_parse(Tja *t, const char *text, size_t len, char *err, size_t errsz) {
   }
   free(buf);
   free(p.items);
+  free(converted);
   return 0;
 }
 

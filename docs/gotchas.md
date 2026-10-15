@@ -450,6 +450,13 @@ stereo.
   the same length; v1 keeps `#N` only. Medley and dan charts use `#NEXTSONG`
   to switch audio files and are not supported.
 - Validate with `python3 apps/taiko/tools/check_timeline.py`.
+- Old charts (2026-10-15, tested with generated fixtures): Shift-JIS is
+  converted in `tja.c` with a CP932 table generated from Python's codec; `〜`
+  becomes U+FF5E as in CP932. Audio can be ogg/wav/mp3 and `WAVE:` is resolved
+  loosely (exact, other case, other extension, `\` separators); on exFAT and
+  macOS the exact stat already matches any case, the scan only matters on
+  case-sensitive disks. mp3 decoding of a long song happens before play, so the
+  app shows a LOADING screen first.
 
 ## Taiko UI reference
 

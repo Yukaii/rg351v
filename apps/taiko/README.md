@@ -12,7 +12,8 @@ never committed.
   no SDL, tested on the host.
 - `src/taiko.c`: the app: menu, calibration, play. Audio callback is the clock;
   an evdev thread timestamps hits; SDL draws.
-- `src/stb_vorbis.c`: ogg decoder (public domain).
+- `src/audio_codecs.c`: audio loading (ogg via `stb_vorbis.c`, wav via
+  `dr_wav.h`, mp3 via `dr_mp3.h`; all public domain) and `WAVE:` resolution.
 - Text uses GNU Unifont from `unifont.bin` (shared with deck/ptterm, shipped by
   the port via `EXTRA_FILES`); without it the app falls back to ASCII only.
   All artwork is drawn from primitives, no game assets.
@@ -24,10 +25,22 @@ never committed.
     scripts/build-port.sh taiko
     scripts/deploy-port.sh taiko        # Homebrew > Taiko
 
-Songs are not part of the port. Put `<name>/<chart>.tja` + its `.ogg` under
-`/storage/roms/homebrew/taiko/songs/` (rsync with `-rLt --no-perms --no-owner
---no-group` for the exFAT partition). Sample charts: see `docs/gotchas.md`, TJA
-charts.
+Songs are not part of the port:
+
+    scripts/taiko.sh sync <dir> [--dry-run]   # every folder with a .tja under <dir>
+    scripts/taiko.sh list
+    scripts/taiko.sh remove <folder>
+
+They end up in `/storage/roms/homebrew/taiko/songs/<name>/` (the SMB share
+works too: drop a chart folder in, the menu rescans on start). Sample charts:
+see `docs/gotchas.md`, TJA charts.
+
+Old charts are supported as they are: Shift-JIS (CP932) text is converted by
+the player (`src/cp932_table.h`, from `tools/gen_cp932.py`), audio may be
+`.ogg`, `.wav` or `.mp3`, and a `WAVE:` name that does not match the file
+exactly (case, other extension, `\` paths) is resolved to the closest file.
+Charts whose audio cannot be found are hidden and the reason is in
+`/tmp/logs/taiko.log`.
 
 ## Controls
 

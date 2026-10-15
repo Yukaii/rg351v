@@ -51,7 +51,7 @@ Open work and what is already done. Facts learned along the way go in
 - [ ] Wrong-colour hit = bad, big notes needing two hits, per-difficulty
   judgement windows, exact score rules, gauge tuning
 - [ ] Branches (`#N/#E/#M` follow the player), `#NEXTSONG` medleys/dan
-- [ ] Song sync script (convert Shift-JIS charts to UTF-8 on the Mac)
+- [x] Song sync script (`scripts/taiko.sh`), Shift-JIS charts and wav/mp3 audio
 - [ ] Measure true audio latency externally to explain the ~-100 ms tap offset
 
 ## Done

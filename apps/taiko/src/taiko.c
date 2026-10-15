@@ -39,10 +39,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "audio_codecs.h"
 #include "game.h"
 #include "tja.h"
-
-extern int stb_vorbis_decode_filename(const char *filename, int *channels, int *sample_rate, short **output);
 
 #define SCR_W 640
 #define SCR_H 480
@@ -1064,30 +1063,23 @@ static void save_offset(void) {
 }
 
 static int load_audio(const char *tja_path, const Tja *t) {
-  char dir[1024];
-  snprintf(dir, sizeof dir, "%s", tja_path);
-  char *sl = strrchr(dir, '/');
-  if (sl) *sl = 0;
-  else strcpy(dir, ".");
-  char path[1400];
-  snprintf(path, sizeof path, "%s/%s", dir, t->wave);
-  int ch = 0, rate = 0;
-  short *raw = NULL;
-  int n = stb_vorbis_decode_filename(path, &ch, &rate, &raw);
-  if (n <= 0 || ch < 1 || ch > 2) {
-    fprintf(stderr, "taiko: cannot decode %s (n=%d ch=%d)\n", path, n, ch);
+  char path[1800];
+  if (audio_resolve(tja_path, t->wave, path, sizeof path) != 0) {
+    fprintf(stderr, "taiko: no playable audio for WAVE:%s next to %s\n", t->wave, tja_path);
     return -1;
   }
-  pcm_rate = rate;
-  pcm_frames = n;
-  if (ch == 2) {
-    pcm = (int16_t *)raw;
-  } else {
-    pcm = malloc((size_t)n * 2 * sizeof(int16_t));
-    for (int i = 0; i < n; i++) pcm[2 * i] = pcm[2 * i + 1] = raw[i];
-    free(raw);
+  int16_t *data = NULL;
+  long frames = 0;
+  int rate = 0;
+  if (audio_decode(path, &data, &frames, &rate) != 0 || rate < 8000 || rate > 192000) {
+    fprintf(stderr, "taiko: cannot decode %s\n", path);
+    free(data);
+    return -1;
   }
-  fprintf(stderr, "taiko: audio %s: %d Hz, %d frames (%.1f s)\n", path, rate, n, (double)n / rate);
+  pcm = data;
+  pcm_frames = frames;
+  pcm_rate = rate;
+  fprintf(stderr, "taiko: audio %s: %d Hz, %ld frames (%.1f s)\n", path, rate, frames, (double)frames / rate);
   return 0;
 }
 
@@ -1137,11 +1129,23 @@ static int sdl_hit_kind(int b) {
   }
 }
 
+/* One frame shown while a (possibly long, mp3) song decodes. */
+static void draw_loading(SDL_Renderer *ren, const char *title) {
+  SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+  sky(ren, 0, 0, 0);
+  col(ren, 14, 22, 58, 200);
+  rect(ren, 0, 170, SCR_W, 140);
+  utext_o(ren, SCR_W / 2 - utext_w(ren, "LOADING...", 3) / 2, 190, "LOADING...", 3, 255, 224, 70, 150, 60, 0, 255);
+  utext_fit(ren, 40, 250, SCR_W - 80, title[0] ? title : "", 2, 255, 255, 255);
+  SDL_RenderPresent(ren);
+}
+
 /* Plays one course. Returns 1 when the whole app should quit. */
 static int play_run(SDL_Renderer *ren, const Tja *tja, const char *tja_path, const TjaCourse *c) {
   Game g;
   if (game_init(&g, c) != 0) return 0;
   View v = {tja, c, &g, 0, 0, g_offset_ms};
+  draw_loading(ren, tja->title);
   if (load_audio(tja_path, tja) != 0) {
     game_free(&g);
     return 0;
@@ -1414,7 +1418,9 @@ static void add_song(const char *path, const char *fname) {
     for (int k = 0; k < s.n_ids; k++) dup |= s.ids[k] == c->id;
     if (c->n_notes && !dup) s.ids[s.n_ids++] = c->id;
   }
-  if (s.n_ids == 0 || !s.tja.wave[0]) {
+  char audio[1800];
+  if (s.n_ids == 0 || !s.tja.wave[0] || audio_resolve(path, s.tja.wave, audio, sizeof audio) != 0) {
+    if (s.n_ids) fprintf(stderr, "taiko: skip %s: audio \"%s\" not found (ogg/wav/mp3)\n", path, s.tja.wave);
     tja_free(&s.tja);
     return;
   }
