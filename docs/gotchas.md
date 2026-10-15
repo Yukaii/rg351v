@@ -451,6 +451,19 @@ stereo.
   to switch audio files and are not supported.
 - Validate with `python3 apps/taiko/tools/check_timeline.py`.
 
+## Taiko UI reference
+
+- Look-and-feel reference (2026-10-15): OpenTaiko's own default skin
+  (`0auBSQ/OpenTaiko`, MIT, `OpenTaiko/System/Open-World Memories/Graphics/
+  5_Game`) shows the arcade conventions: glossy note discs with a thin outline
+  in the note's hue, a vertical gradient and a three-lobed swirl; gold
+  drumrolls with a brown outline; balloons with a tail; roll/balloon counters in
+  white speech clouds; a pink-to-yellow lane glow for GOGO TIME; a light-blue
+  dotted result board. Wikipedia only has cabinet/box photos, no gameplay.
+- Only the conventions were used; every sprite in `apps/taiko` is generated
+  procedurally at start-up. Reference downloads live in `.storage/reference/`
+  (git-ignored) and must not be committed.
+
 ## PocketJS (evaluated, not pursued)
 
 Cost (2026-10-13, `hero` demo, 960x544 raster, headless): boot ~250 ms, 19.6 MB

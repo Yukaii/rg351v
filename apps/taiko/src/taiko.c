@@ -433,6 +433,17 @@ static void utext_s(SDL_Renderer *r, int x, int y, const char *s, int scale, Uin
   utext(r, x, y, s, scale, R, G, B, A);
 }
 
+/* thick outline: the text stamped around itself in the outline colour */
+static void utext_o(SDL_Renderer *r, int x, int y, const char *s, int scale, Uint8 R, Uint8 G, Uint8 B, Uint8 oR,
+                    Uint8 oG, Uint8 oB, Uint8 A) {
+  int o = scale > 2 ? 2 : 1;
+  for (int dy = -o; dy <= o; dy++)
+    for (int dx = -o; dx <= o; dx++)
+      if (dx || dy) utext(r, x + dx, y + dy, s, scale, oR, oG, oB, A);
+  utext(r, x, y, s, scale, R, G, B, A);
+  utext(r, x + 1, y, s, scale, R, G, B, A);
+}
+
 /* fit into maxw pixels: cut and end with "..." when too long */
 static void utext_fit(SDL_Renderer *r, int x, int y, int maxw, const char *s, int scale, Uint8 R, Uint8 G, Uint8 B) {
   if (utext_w(r, s, scale) <= maxw) {
@@ -512,64 +523,203 @@ static void pill(SDL_Renderer *r, int x, int y, int w, int h, int R, int G, int 
   rect(r, (float)x, (float)y, (float)w, (float)h / 3);
 }
 
-static double px_per_s(double bpm, double scroll) { return bpm * scroll / 60.0 * BEAT_PX; }
+/* ---- procedural sprites ------------------------------------------------- */
+/* The note discs are generated once at start-up (outlined, vertical gradient,
+ * three-lobed swirl, shine), which is both nicer and cheaper than drawing
+ * them with scanline rectangles every frame. */
+typedef struct {
+  SDL_Texture *don, *ka, *bigdon, *bigka, *roll, *bigroll, *balloon, *cloud, *bubble;
+  int ready;
+} Sprites;
+static Sprites spr;
 
-/* A note disc in the arcade style: black edge, white ring, coloured body with a
- * lighter centre and a small shine. */
-static void disc(SDL_Renderer *r, float x, float y, int rad, int R, int G, int B, int dim) {
-  if (dim) R /= 2, G /= 2, B /= 2;
-  col(r, 0, 0, 0, 255);
-  fill_circle(r, x, y, rad + 4);
-  col(r, dim ? 150 : 255, dim ? 150 : 255, dim ? 150 : 255, 255);
-  fill_circle(r, x, y, rad + 2);
-  col(r, R, G, B, 255);
-  fill_circle(r, x, y, rad);
-  col(r, R + (255 - R) / 2, G + (255 - G) / 2, B + (255 - B) / 2, 255);
-  fill_circle(r, x, y, rad - 7);
-  if (!dim) {
-    col(r, 255, 255, 255, 255);
-    fill_circle(r, x - (float)rad / 3, y - (float)rad / 3, 3);
-  }
+static float clamp01f(float x) { return x < 0 ? 0 : x > 1 ? 1 : x; }
+static float mixf(float a, float b, float t) { return a + (b - a) * t; }
+
+typedef struct { float r, g, b; } RGBf;
+static RGBf rgbf(int r, int g, int b) { return (RGBf){(float)r, (float)g, (float)b}; }
+static RGBf mixc(RGBf a, RGBf b, float t) { return (RGBf){mixf(a.r, b.r, t), mixf(a.g, b.g, t), mixf(a.b, b.b, t)}; }
+
+static Uint32 pack(RGBf c, float a) {
+  int R = (int)(c.r + 0.5f), G = (int)(c.g + 0.5f), B = (int)(c.b + 0.5f), A = (int)(clamp01f(a) * 255.0f + 0.5f);
+  if (R > 255) R = 255;
+  if (G > 255) G = 255;
+  if (B > 255) B = 255;
+  return (Uint32)R | (Uint32)G << 8 | (Uint32)B << 16 | (Uint32)A << 24;
 }
 
+static SDL_Texture *tex_from(SDL_Renderer *r, Uint32 *px, int w, int h) {
+  SDL_Surface *sf = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_RGBA32, px, w * 4);
+  SDL_Texture *t = sf ? SDL_CreateTextureFromSurface(r, sf) : NULL;
+  if (sf) SDL_DestroySurface(sf);
+  if (t) {
+    SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureScaleMode(t, SDL_SCALEMODE_LINEAR);
+  }
+  return t;
+}
+
+/* A glossy note disc. tail > 0 adds a balloon tail to the right (in rad units). */
+static SDL_Texture *make_disc(SDL_Renderer *r, int rad, RGBf outline, RGBf top, RGBf bottom, RGBf light, float tail,
+                              int *out_w, int *out_h) {
+  int tail_px = (int)(tail * (float)rad);
+  int w = 2 * (rad + 4) + tail_px, h = 2 * (rad + 4);
+  Uint32 *px = calloc((size_t)w * (size_t)h, sizeof *px);
+  float cx = (float)(rad + 4), cy = (float)(rad + 4);
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      float fx = (float)x + 0.5f - cx, fy = (float)y + 0.5f - cy;
+      float d = sqrtf(fx * fx + fy * fy);
+      float sd = d - (float)rad; /* signed distance to the shape edge */
+      if (tail_px > 0) { /* tapered neck + rounded end */
+        float t = fx / (float)tail_px;
+        float half = (float)rad * (0.62f - 0.30f * clamp01f(t));
+        float sd_band = fmaxf(fabsf(fy) - half, fmaxf(-fx, fx - (float)tail_px));
+        float ex = fx - (float)tail_px, sd_end = sqrtf(ex * ex + fy * fy) - (float)rad * 0.34f;
+        sd = fminf(sd, fminf(sd_band, sd_end));
+      }
+      float a = clamp01f(0.5f - sd);
+      if (a <= 0) continue;
+      float t = clamp01f((fy + (float)rad) / (2.0f * (float)rad));
+      RGBf c = mixc(top, bottom, t);
+      if (d < (float)rad * 1.05f) {
+        /* three-lobed swirl, like the arcade note face */
+        for (int k = 0; k < 3; k++) {
+          float ang = -1.5708f + (float)k * 2.0944f;
+          float lx = fx - 0.40f * (float)rad * cosf(ang), ly = fy - 0.40f * (float)rad * sinf(ang);
+          float m = clamp01f(0.30f * (float)rad - sqrtf(lx * lx + ly * ly) + 0.5f);
+          c = mixc(c, light, m * 0.55f);
+        }
+        float hub = clamp01f(0.15f * (float)rad - d + 0.5f);
+        c = mixc(c, bottom, hub * 0.7f);
+        /* shine, upper left */
+        float ex = (fx + 0.38f * (float)rad) / (0.34f * (float)rad), ey = (fy + 0.50f * (float)rad) / (0.16f * (float)rad);
+        float sh = clamp01f(1.0f - (ex * ex + ey * ey));
+        c = mixc(c, rgbf(255, 255, 255), sh * 0.55f);
+      }
+      float edge = clamp01f(sd + 2.4f + 0.5f); /* outline band just inside the edge */
+      c = mixc(c, outline, edge);
+      px[y * w + x] = pack(c, a);
+    }
+  }
+  SDL_Texture *t = tex_from(r, px, w, h);
+  free(px);
+  *out_w = w;
+  *out_h = h;
+  return t;
+}
+
+static SDL_Texture *make_cloud(SDL_Renderer *r, int outlined, int *out_w, int *out_h) {
+  const int w = 150, h = 92;
+  static const float C[5][3] = {{36, 56, 24}, {64, 40, 28}, {96, 46, 28}, {118, 58, 20}, {78, 62, 26}};
+  Uint32 *px = calloc((size_t)w * (size_t)h, sizeof *px);
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      float sd = 1e9f;
+      for (int k = 0; k < 5; k++) {
+        float dx = (float)x + 0.5f - C[k][0], dy = (float)y + 0.5f - C[k][1];
+        sd = fminf(sd, sqrtf(dx * dx + dy * dy) - C[k][2]);
+      }
+      float a = clamp01f(0.5f - sd);
+      if (a <= 0) continue;
+      RGBf c = mixc(rgbf(255, 255, 255), rgbf(214, 232, 252), clamp01f((float)y / (float)h));
+      if (outlined) c = mixc(c, rgbf(0, 0, 0), clamp01f(sd + 3.0f + 0.5f));
+      px[y * w + x] = pack(c, outlined ? a : a * 0.92f);
+    }
+  }
+  SDL_Texture *t = tex_from(r, px, w, h);
+  free(px);
+  *out_w = w;
+  *out_h = h;
+  return t;
+}
+
+static void sprites_init(SDL_Renderer *r) {
+  if (spr.ready) return;
+  int w, h;
+  RGBf red_o = rgbf(96, 12, 20), red_t = rgbf(255, 118, 64), red_b = rgbf(232, 36, 36), red_l = rgbf(255, 170, 120);
+  RGBf blu_o = rgbf(10, 36, 96), blu_t = rgbf(150, 236, 255), blu_b = rgbf(36, 150, 238), blu_l = rgbf(200, 248, 255);
+  RGBf yel_o = rgbf(104, 64, 12), yel_t = rgbf(255, 232, 80), yel_b = rgbf(255, 178, 12), yel_l = rgbf(255, 246, 170);
+  RGBf org_o = rgbf(110, 40, 8), org_t = rgbf(255, 170, 60), org_b = rgbf(240, 96, 14), org_l = rgbf(255, 206, 130);
+  spr.don = make_disc(r, 21, red_o, red_t, red_b, red_l, 0, &w, &h);
+  spr.ka = make_disc(r, 21, blu_o, blu_t, blu_b, blu_l, 0, &w, &h);
+  spr.bigdon = make_disc(r, 31, red_o, red_t, red_b, red_l, 0, &w, &h);
+  spr.bigka = make_disc(r, 31, blu_o, blu_t, blu_b, blu_l, 0, &w, &h);
+  spr.roll = make_disc(r, 21, yel_o, yel_t, yel_b, yel_l, 0, &w, &h);
+  spr.bigroll = make_disc(r, 31, yel_o, yel_t, yel_b, yel_l, 0, &w, &h);
+  spr.balloon = make_disc(r, 27, org_o, org_t, org_b, org_l, 1.9f, &w, &h);
+  spr.cloud = make_cloud(r, 0, &w, &h);
+  spr.bubble = make_cloud(r, 1, &w, &h);
+  spr.ready = 1;
+}
+
+static void blit(SDL_Renderer *r, SDL_Texture *t, float cx, float cy, float scale, Uint8 mod, Uint8 alpha) {
+  if (!t) return;
+  float tw, th;
+  SDL_GetTextureSize(t, &tw, &th);
+  SDL_SetTextureColorMod(t, mod, mod, mod);
+  SDL_SetTextureAlphaMod(t, alpha);
+  SDL_FRect d = {cx - tw * scale / 2, cy - th * scale / 2, tw * scale, th * scale};
+  SDL_RenderTexture(r, t, NULL, &d);
+}
+
+/* disc sprites have the shape centre at (rad+4, rad+4); balloons have a tail
+ * to the right, so anchor by the head: shift by the half-width difference */
+static void blit_head(SDL_Renderer *r, SDL_Texture *t, float hx, float hy, int rad, Uint8 mod) {
+  if (!t) return;
+  float tw, th;
+  SDL_GetTextureSize(t, &tw, &th);
+  SDL_SetTextureColorMod(t, mod, mod, mod);
+  SDL_SetTextureAlphaMod(t, 255);
+  SDL_FRect d = {hx - (float)(rad + 4), hy - th / 2, tw, th};
+  SDL_RenderTexture(r, t, NULL, &d);
+}
+
+static double px_per_s(double bpm, double scroll) { return bpm * scroll / 60.0 * BEAT_PX; }
+
 static void draw_note(SDL_Renderer *r, const TjaNote *n, double T, int missed) {
+  sprites_init(r);
   double sp = px_per_s(n->bpm, n->scroll);
   double x = JX + (n->t - T) * sp;
   float cy = LANE_Y + LANE_H / 2.0f;
+  Uint8 mod = missed ? 120 : 255;
   switch (n->type) {
     case TJA_DON:
-    case TJA_BIGDON:
     case TJA_KA:
+    case TJA_BIGDON:
     case TJA_BIGKA: {
       if (x < -40 || x > SCR_W + 40) return;
-      int big = n->type == TJA_BIGDON || n->type == TJA_BIGKA;
-      int don = n->type == TJA_DON || n->type == TJA_BIGDON;
-      if (don) disc(r, (float)x, cy, big ? 30 : 21, 238, 56, 38, missed);
-      else disc(r, (float)x, cy, big ? 30 : 21, 44, 160, 232, missed);
+      SDL_Texture *t = n->type == TJA_DON ? spr.don : n->type == TJA_KA ? spr.ka : n->type == TJA_BIGDON ? spr.bigdon : spr.bigka;
+      col(r, 0, 0, 0, missed ? 30 : 70); /* soft drop shadow */
+      blit(r, t, (float)x + 1, cy + 3, 1.0f, 0, missed ? 40 : 90);
+      blit(r, t, (float)x, cy, 1.0f, mod, 255);
       break;
     }
     case TJA_ROLL:
     case TJA_BIGROLL: {
       double x2 = JX + (n->end_t - T) * sp;
       if (x2 < -40 || x > SCR_W + 40) return;
-      int h = n->type == TJA_BIGROLL ? 30 : 21;
+      int big = n->type == TJA_BIGROLL;
+      int h = big ? 31 : 21;
       double xa = x < JX && x2 > JX ? JX : x;
-      col(r, 0, 0, 0, 255);
-      rect(r, (float)xa, cy - h - 4, (float)(x2 - xa), (float)(2 * h + 8));
-      col(r, 255, 255, 255, 255);
-      rect(r, (float)xa, cy - h - 2, (float)(x2 - xa), (float)(2 * h + 4));
-      col(r, 250, 196, 36, 255);
-      rect(r, (float)xa, cy - h, (float)(x2 - xa), (float)(2 * h));
-      col(r, 255, 232, 130, 255);
-      rect(r, (float)xa, cy - h + 5, (float)(x2 - xa), (float)(h - 4));
-      disc(r, (float)x2, cy, h, 250, 196, 36, 0);
-      if (x >= JX) disc(r, (float)x, cy, h, 250, 196, 36, 0);
+      float len = (float)(x2 - xa);
+      col(r, 104, 64, 12, 255);
+      rect(r, (float)xa, cy - h - 1, len, (float)(2 * h + 2));
+      for (int i = 0; i < 2 * h; i++) { /* gold gradient, light on top */
+        float t = (float)i / (float)(2 * h);
+        col(r, 255, (int)(236 - 62 * t), (int)(90 - 70 * t), 255);
+        rect(r, (float)xa, cy - h + (float)i, len, 1);
+      }
+      col(r, 255, 255, 255, 70);
+      rect(r, (float)xa, cy - h + 3, len, (float)h / 3);
+      blit_head(r, big ? spr.bigroll : spr.roll, (float)x2, cy, h, mod);
+      if (x >= JX) blit_head(r, big ? spr.bigroll : spr.roll, (float)x, cy, h, mod);
       break;
     }
-    default: { /* balloon, kusudama */
+    default: { /* balloon, kusudama: a balloon with its tail trailing right */
       double xd = x < JX ? JX : x;
       if (xd > SCR_W + 40 || n->end_t < T) return;
-      disc(r, (float)xd, cy, 27, 246, 130, 30, 0);
+      blit_head(r, spr.balloon, (float)xd, cy, 27, mod);
       break;
     }
   }
@@ -600,11 +750,40 @@ static void soul_gauge(SDL_Renderer *r, int x, int y, int w, int h, const Game *
   rect(r, (float)x + (float)clear * cw - 1, (float)y - 5, 2, (float)h + 10);
 }
 
+/* sky background shared by the menu and the play screen */
+static void sky(SDL_Renderer *r, double t, float pulse, int gogo) {
+  gradient(r, 0, SCR_H, gogo ? 120 : 92, gogo ? 150 : 170, gogo ? 214 : 236, gogo ? 255 : 208, gogo ? 214 : 234,
+           gogo ? 226 : 252);
+  if (pulse > 0) {
+    col(r, 255, 255, 255, (int)(pulse * 26));
+    rect(r, 0, 0, SCR_W, SCR_H);
+  }
+  sprites_init(r);
+  static const float CL[6][3] = {{0.0f, 300, 0.9f}, {150.0f, 372, 1.15f}, {300.0f, 330, 0.8f},
+                                 {450.0f, 410, 1.3f}, {600.0f, 280, 0.7f}, {760.0f, 360, 1.0f}};
+  for (int i = 0; i < 6; i++) {
+    float x = fmodf(CL[i][0] + (float)(t * (6.0 + 4.0 * CL[i][2])), 820.0f) - 90.0f;
+    blit(r, spr.cloud, x, CL[i][1], CL[i][2], 255, 235);
+  }
+  /* rolling hills */
+  for (int x = 0; x < SCR_W; x += 8) {
+    float h = 34.0f + 14.0f * sinf((float)x / 70.0f + 0.7f) + 8.0f * sinf((float)x / 23.0f);
+    col(r, 112, 196, 140, 255);
+    rect(r, (float)x, SCR_H - h, 8, h);
+  }
+  for (int x = 0; x < SCR_W; x += 8) {
+    float h = 18.0f + 9.0f * sinf((float)x / 55.0f + 2.1f);
+    col(r, 70, 160, 120, 255);
+    rect(r, (float)x, SCR_H - h, 8, h);
+  }
+}
+
 static void render(SDL_Renderer *r, View *v, double Tj, double T, int result) {
   const TjaCourse *c = v->c;
   Game *g = v->g;
   const Tja *tja = v->tja;
   SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+  sprites_init(r);
 
   while (v->draw_start < c->n_notes) {
     const TjaNote *n = &c->notes[v->draw_start];
@@ -618,87 +797,120 @@ static void render(SDL_Renderer *r, View *v, double Tj, double T, int result) {
   if (v->draw_start < c->n_notes) bpm = c->notes[v->draw_start].bpm;
   double beat = fmod(T * bpm / 60.0, 1.0);
   if (beat < 0) beat += 1.0;
-  float pulse = beat < 0.35 ? (float)(1.0 - beat / 0.35) : 0.0f;
+  float pulse = beat < 0.30 ? (float)(1.0 - beat / 0.30) : 0.0f;
 
-  /* background */
-  gradient(r, 0, SCR_H, 16 + (gogo ? 30 : 0), 20, 48, 40 + (int)(pulse * 18) + (gogo ? 60 : 0), 16, 56);
-  /* faint rising stripes in the lower half give the beat something to move */
-  for (int i = 0; i < 10; i++) {
-    float sx = fmodf((float)i * 70.0f + (float)(T * 24.0), 700.0f) - 30.0f;
-    col(r, 255, 255, 255, 10 + (int)(pulse * 14));
-    rect(r, sx, LANE_Y + LANE_H + 8, 26, SCR_H - LANE_Y - LANE_H - 40);
-  }
+  sky(r, T, pulse, gogo);
 
-  /* header */
-  col(r, 0, 0, 0, 140);
+  /* header: ribbon with title, course badge, score and soul gauge */
+  col(r, 14, 22, 58, 215);
   rect(r, 0, 0, SCR_W, 74);
-  utext_fit(r, 12, 6, 300, tja->title[0] ? tja->title : "?", 2, 255, 255, 255);
+  col(r, 255, 255, 255, 70);
+  rect(r, 0, 72, SCR_W, 2);
   int cr, cg, cb;
   course_rgb(c->id, &cr, &cg, &cb);
+  {
+    const char *title = tja->title[0] ? tja->title : "?";
+    int maxw = 300;
+    char buf[256];
+    snprintf(buf, sizeof buf, "%s", title);
+    if (utext_w(r, buf, 2) > maxw) { /* cut with "..." */
+      size_t n = 0;
+      int w = 0, dots = utext_w(r, "...", 2);
+      const char *p = title;
+      while (*p && n + 8 < sizeof buf) {
+        uint32_t cp;
+        int len = u8_next(p, &cp), wide;
+        glyph_tex(r, cp, &wide);
+        int adv = (wide ? 16 : 8) * 2;
+        if (w + adv + dots > maxw) break;
+        memcpy(buf + n, p, (size_t)len);
+        n += (size_t)len;
+        w += adv;
+        p += len;
+      }
+      buf[n] = 0;
+      strcat(buf, "...");
+    }
+    utext_o(r, 12, 6, buf, 2, 255, 255, 255, 14, 22, 58, 255);
+  }
   char badge[48];
   snprintf(badge, sizeof badge, "%s  \xE2\x98\x85%d", course_name(c->id), c->level);
   int bw = utext_w(r, badge, 1) + 16;
   pill(r, 12, 42, bw, 22, cr, cg, cb);
-  utext(r, 20, 45, badge, 1, 255, 255, 255, 255);
+  utext_o(r, 20, 45, badge, 1, 255, 255, 255, 60, 20, 30, 255);
 
   char sc[32];
   snprintf(sc, sizeof sc, "%ld", g->score);
-  utext_s(r, SCR_W - 12 - utext_w(r, sc, 3), 0, sc, 3, 255, 236, 120, 255);
-  utext_s(r, 332, 54, "SOUL", 1, 255, 255, 255, 255);
-  soul_gauge(r, 376, 53, 252, 16, g);
+  utext_o(r, SCR_W - 12 - utext_w(r, sc, 3), 0, sc, 3, 255, 255, 255, 214, 120, 10, 255);
+  utext_o(r, 336, 52, "\xE9\xAD\x82", 1, 255, 236, 120, 120, 30, 10, 255); /* soul */
+  soul_gauge(r, 360, 53, 268, 16, g);
 
-  /* lane */
+  /* lane: dark bar, bright edges; GOGO adds the pink-to-yellow glow */
   float cy = LANE_Y + LANE_H / 2.0f;
-  col(r, 0, 0, 0, 170);
-  rect(r, 0, LANE_Y - 4, SCR_W, LANE_H + 8);
-  if (gogo) col(r, 150 + (int)(pulse * 40), 70, 60, 255);
-  else col(r, 56, 56, 66, 255);
+  col(r, 0, 0, 0, 110);
+  rect(r, 0, LANE_Y - 5, SCR_W, LANE_H + 12);
+  col(r, 30, 24, 40, 255);
   rect(r, 0, LANE_Y, SCR_W, LANE_H);
-  col(r, 255, 255, 255, gogo ? 90 : 40);
-  rect(r, 0, LANE_Y, SCR_W, 3);
-  rect(r, 0, LANE_Y + LANE_H - 3, SCR_W, 3);
-  if (gogo) { /* flames along the lane while GOGO TIME */
-    for (int i = 0; i < 14; i++) {
-      float hgt = 8.0f + 10.0f * (0.5f + 0.5f * sinf((float)(T * 9.0 + i * 1.7)));
-      col(r, 255, 170 + (i % 3) * 25, 40, 160);
-      rect(r, 170.0f + (float)i * 33.0f, LANE_Y - hgt, 18, hgt);
+  if (gogo) {
+    for (int x = 0; x < SCR_W; x += 8) {
+      float k = clamp01f((float)(x - (JX - 20)) / 460.0f);
+      RGBf cc = k < 0.4f ? mixc(rgbf(255, 70, 190), rgbf(255, 236, 140), k / 0.4f) : rgbf(255, 244, 190);
+      float a = (0.98f - 0.62f * k) * (0.88f + 0.12f * pulse);
+      col(r, (int)cc.r, (int)cc.g, (int)cc.b, (int)(a * 255.0f));
+      rect(r, (float)x, LANE_Y, 8, LANE_H);
     }
   }
-  col(r, 26, 26, 34, 255);
-  rect(r, 0, LANE_Y, JX + 44, LANE_H);
+  col(r, 246, 246, 252, 255);
+  rect(r, 0, LANE_Y, SCR_W, 3);
+  rect(r, 0, LANE_Y + LANE_H - 3, SCR_W, 3);
+  col(r, 60, 50, 80, 255);
+  rect(r, 0, LANE_Y + 3, JX + 46, LANE_H - 6);
+  col(r, 255, 255, 255, 30);
+  rect(r, 0, LANE_Y + 3, JX + 46, 4);
 
   /* bar lines */
   while (v->bar_start < c->n_bars && c->bars[v->bar_start].t < T - 0.5) v->bar_start++;
-  col(r, 214, 214, 224, 200);
+  col(r, 240, 240, 250, 210);
   for (size_t i = v->bar_start; i < c->n_bars && c->bars[i].t < T + 8.0; i++) {
     const TjaBar *b = &c->bars[i];
     if (!b->visible) continue;
     double x = JX + (b->t - T) * px_per_s(b->bpm, b->scroll);
-    if (x < JX + 36 || x > SCR_W) continue;
+    if (x < JX + 40 || x > SCR_W) continue;
     rect(r, (float)x, LANE_Y + 3, 2, LANE_H - 6);
   }
 
-  /* drum: rim (ka) and head (don) flash on a hit */
+  /* taiko: wooden rim with tacks, blue rim (ka) and red head (don) that flash */
   int since = (Tj - g->hit_t < 0.09 && g->hit_t > 0);
   int hit_don = since && g->hit_kind == HIT_DON, hit_ka = since && g->hit_kind == HIT_KA;
   col(r, 0, 0, 0, 255);
-  fill_circle(r, 62, cy, 46);
-  if (hit_ka) col(r, 120, 200, 255, 255);
-  else col(r, 40, 110, 205, 255);
-  fill_circle(r, 62, cy, 42);
-  col(r, 236, 230, 214, 255);
-  fill_circle(r, 62, cy, 31);
-  if (hit_don) col(r, 255, 110, 90, 255);
-  else col(r, 224, 52, 36, 255);
-  fill_circle(r, 62, cy, 21);
+  fill_circle(r, 62, cy, 47);
+  col(r, 214, 218, 232, 255);
+  fill_circle(r, 62, cy, 45);
+  if (hit_ka) col(r, 150, 220, 255, 255);
+  else col(r, 36, 108, 214, 255);
+  fill_circle(r, 62, cy, 41);
+  for (int k = 0; k < 12; k++) {
+    float a = (float)k * 0.5236f;
+    col(r, 250, 250, 255, 255);
+    fill_circle(r, 62 + 37.0f * cosf(a), cy + 37.0f * sinf(a), 2);
+  }
+  col(r, 244, 238, 222, 255);
+  fill_circle(r, 62, cy, 30);
+  col(r, 0, 0, 0, 90);
+  fill_circle(r, 62, cy + 2, 21);
+  if (hit_don) col(r, 255, 120, 96, 255);
+  else col(r, 226, 48, 36, 255);
+  fill_circle(r, 62, cy, 20);
+  col(r, 255, 255, 255, 90);
+  fill_circle(r, 56, cy - 7, 6);
 
-  /* target: guide ring, bigger faint ring for big notes */
-  col(r, 255, 255, 255, 60);
-  ring(r, JX, cy, 36, 3);
-  col(r, 236, 236, 244, 255);
-  ring(r, JX, cy, 27, 4);
-  col(r, 0, 0, 0, 255);
-  ring(r, JX, cy, 31, 1);
+  /* target ring and its big-note guide */
+  col(r, 255, 255, 255, 70);
+  ring(r, JX, cy, 38, 3);
+  col(r, 0, 0, 0, 200);
+  fill_circle(r, JX, cy, 29);
+  col(r, 248, 248, 255, 255);
+  ring(r, JX, cy, 29, 4);
 
   /* notes, far to near so near ones sit on top */
   size_t last = v->draw_start;
@@ -707,29 +919,36 @@ static void render(SDL_Renderer *r, View *v, double Tj, double T, int result) {
     if (g->done[i] == 1) continue;
     draw_note(r, &c->notes[i], T, g->done[i] == 2);
   }
-  for (size_t i = v->draw_start; i < last; i++) { /* balloon counter */
+  /* roll / balloon counter in a speech cloud */
+  for (size_t i = v->draw_start; i < last; i++) {
     const TjaNote *n = &c->notes[i];
-    if ((n->type == TJA_BALLOON || n->type == TJA_KUSUDAMA) && !g->done[i] && n->t <= T && T <= n->end_t) {
-      char b[16];
-      snprintf(b, sizeof b, "%d", n->hits - g->roll_hits[i]);
-      utext_s(r, JX + 40, (int)cy - 56, b, 4, 255, 236, 120, 255);
-    }
+    int is_b = n->type == TJA_BALLOON || n->type == TJA_KUSUDAMA;
+    int is_r = n->type == TJA_ROLL || n->type == TJA_BIGROLL;
+    if (!(is_b || is_r) || g->done[i] || n->t > T || T > n->end_t) continue;
+    int shown = is_b ? n->hits - g->roll_hits[i] : g->roll_hits[i];
+    if (is_r && shown == 0) continue;
+    char b[16];
+    snprintf(b, sizeof b, "%d", shown);
+    blit(r, spr.bubble, JX + 96, LANE_Y - 22, 0.85f, 255, 255);
+    utext_o(r, JX + 96 - utext_w(r, b, 3) / 2, LANE_Y - 22 - 24, b, 3, is_b ? 255 : 80, is_b ? 110 : 150,
+            is_b ? 10 : 255, 255, 255, 255, 255);
   }
 
-  /* judgement: rising kanji + an expanding ring on good/ok */
+  /* judgement: outlined kanji rising off the drum, ring on good/ok */
   double age = Tj - g->fb_t;
   if (g->fb_judge && age >= 0 && age < 0.45) {
     static const char *J[] = {"", "\xE8\x89\xAF", "\xE5\x8F\xAF", "\xE4\xB8\x8D\xE5\x8F\xAF", "\xE4\xB8\x8D\xE5\x8F\xAF"};
-    static const int RGB[5][3] = {{0, 0, 0}, {255, 214, 60}, {255, 255, 255}, {110, 150, 255}, {140, 140, 160}};
+    static const int F[5][3] = {{0, 0, 0}, {255, 230, 80}, {255, 255, 255}, {120, 170, 255}, {170, 170, 190}};
+    static const int O[5][3] = {{0, 0, 0}, {168, 70, 0}, {80, 80, 100}, {16, 28, 100}, {50, 50, 70}};
     int a = (int)(255 * (1.0 - age / 0.45));
-    int yy = LANE_Y - 50 - (int)(age * 36);
+    int yy = LANE_Y - 54 - (int)(age * 30);
     int jw = utext_w(r, J[g->fb_judge], 3);
-    utext(r, JX - jw / 2 + 3, yy + 3, J[g->fb_judge], 3, 0, 0, 0, (Uint8)(a / 2));
-    utext(r, JX - jw / 2, yy, J[g->fb_judge], 3, (Uint8)RGB[g->fb_judge][0], (Uint8)RGB[g->fb_judge][1],
-          (Uint8)RGB[g->fb_judge][2], (Uint8)a);
+    utext_o(r, JX - jw / 2, yy, J[g->fb_judge], 3, (Uint8)F[g->fb_judge][0], (Uint8)F[g->fb_judge][1],
+            (Uint8)F[g->fb_judge][2], (Uint8)O[g->fb_judge][0], (Uint8)O[g->fb_judge][1], (Uint8)O[g->fb_judge][2],
+            (Uint8)a);
     if (g->fb_judge <= J_OK && age < 0.2) {
-      col(r, RGB[g->fb_judge][0], RGB[g->fb_judge][1], RGB[g->fb_judge][2], (int)(220 * (1.0 - age / 0.2)));
-      ring(r, JX, cy, 36 + (int)(age * 130), 4);
+      col(r, F[g->fb_judge][0], F[g->fb_judge][1], F[g->fb_judge][2], (int)(230 * (1.0 - age / 0.2)));
+      ring(r, JX, cy, 30 + (int)(age * 150), 5);
     }
   }
 
@@ -738,56 +957,72 @@ static void render(SDL_Renderer *r, View *v, double Tj, double T, int result) {
     char cb[24];
     snprintf(cb, sizeof cb, "%d", g->combo);
     int w = utext_w(r, cb, 5);
-    utext_s(r, 62 - w / 2, LANE_Y + LANE_H + 14, cb, 5, 255, 214, 60, 255);
-    utext_s(r, 62 - utext_w(r, "COMBO", 1) / 2, LANE_Y + LANE_H + 14 + 84, "COMBO", 1, 255, 255, 255, 255);
+    utext_o(r, 62 - w / 2, LANE_Y + LANE_H + 12, cb, 5, 255, 236, 100, 150, 40, 0, 255);
+    utext_o(r, 62 - utext_w(r, "COMBO", 1) / 2, LANE_Y + LANE_H + 12 + 84, "COMBO", 1, 255, 255, 255, 40, 50, 100, 255);
   }
 
   /* progress and trims */
   double prog = g->last_t > 0 ? Tj / g->last_t : 0;
   if (prog < 0) prog = 0;
   if (prog > 1) prog = 1;
-  col(r, 0, 0, 0, 160);
+  col(r, 14, 22, 58, 190);
   rect(r, 0, SCR_H - 26, SCR_W, 26);
-  col(r, 70, 70, 84, 255);
+  col(r, 80, 90, 130, 255);
   rect(r, 8, SCR_H - 8, SCR_W - 16, 4);
-  col(r, 250, 200, 40, 255);
+  col(r, 255, 210, 50, 255);
   rect(r, 8, SCR_H - 8, (float)((SCR_W - 16) * prog), 4);
   char st[120];
   snprintf(st, sizeof st, "judge %+d ms (L2/R2)   %d good  %d ok  %d bad  %d miss", v->offset_ms, g->good, g->ok, g->bad,
            g->miss);
-  utext(r, 8, SCR_H - 24, st, 1, 190, 190, 205, 255);
+  utext(r, 8, SCR_H - 24, st, 1, 214, 220, 240, 255);
 
   if (result) {
-    col(r, 0, 0, 0, 190);
+    col(r, 8, 16, 48, 150);
     rect(r, 0, 0, SCR_W, SCR_H);
-    col(r, 250, 200, 40, 255);
-    rect(r, 54, 54, SCR_W - 108, SCR_H - 108);
-    col(r, 20, 22, 40, 255);
-    rect(r, 58, 58, SCR_W - 116, SCR_H - 116);
-    pill(r, 74, 74, 120, 24, cr, cg, cb);
-    utext(r, 86, 78, badge, 1, 255, 255, 255, 255);
-    utext_fit(r, 74, 104, SCR_W - 150, tja->title, 2, 255, 255, 255);
+    /* light-blue dotted panel, as on the arcade result board */
+    col(r, 255, 255, 255, 255);
+    rect(r, 50, 50, SCR_W - 100, SCR_H - 100);
+    col(r, 150, 214, 255, 255);
+    rect(r, 56, 56, SCR_W - 112, SCR_H - 112);
+    for (int dy = 0; dy < 14; dy++)
+      for (int dx = 0; dx < 24; dx++) {
+        col(r, 184, 230, 255, 255);
+        fill_circle(r, 66.0f + (float)dx * 22.0f + (dy % 2) * 11.0f, 66.0f + (float)dy * 22.0f, 6);
+      }
+    col(r, 255, 255, 255, 215);
+    rect(r, 70, 140, 270, 240);
+    rect(r, 360, 140, SCR_W - 70 - 360, 240);
+    pill(r, 70, 70, 120, 24, cr, cg, cb);
+    utext_o(r, 82, 74, badge, 1, 255, 255, 255, 60, 20, 30, 255);
+    {
+      char tb[256];
+      snprintf(tb, sizeof tb, "%s", tja->title);
+      utext_fit(r, 70, 100, SCR_W - 330, tb, 2, 255, 255, 255);
+    }
     int cleared = game_cleared(g);
-    utext_s(r, SCR_W - 74 - utext_w(r, cleared ? "CLEAR" : "FAILED", 4), 70, cleared ? "CLEAR" : "FAILED", 4,
-            cleared ? 255 : 150, cleared ? 214 : 160, cleared ? 60 : 190, 255);
+    const char *verdict = cleared ? "CLEAR" : "FAILED";
+    utext_o(r, SCR_W - 70 - utext_w(r, verdict, 4), 66, verdict, 4, cleared ? 255 : 190, cleared ? 230 : 200,
+            cleared ? 80 : 230, cleared ? 190 : 40, cleared ? 70 : 60, cleared ? 0 : 110, 255);
     char l[64];
-    const char *lab[] = {"\xE8\x89\xAF  GOOD", "\xE5\x8F\xAF  OK", "\xE4\xB8\x8D\xE5\x8F\xAF  BAD", "MISS", "MAX COMBO", "ROLL",
+    const char *lab[] = {"\xE8\x89\xAF GOOD", "\xE5\x8F\xAF OK", "\xE4\xB8\x8D\xE5\x8F\xAF BAD", "MISS", "MAX COMBO", "ROLL",
                          "BALLOON"};
+    static const int LC[7][3] = {{20, 140, 230}, {40, 170, 60}, {220, 50, 50}, {110, 110, 130},
+                                 {230, 130, 20}, {230, 130, 20}, {230, 130, 20}};
     int val[] = {g->good, g->ok, g->bad, g->miss, g->max_combo, g->roll_total, g->balloons_popped};
     for (int i = 0; i < 7; i++) {
-      int yy = 146 + i * 34;
-      utext_s(r, 90, yy, lab[i], 2, 235, 235, 245, 255);
+      int yy = 146 + i * 33;
+      utext_o(r, 82, yy, lab[i], 2, (Uint8)LC[i][0], (Uint8)LC[i][1], (Uint8)LC[i][2], 255, 255, 255, 255);
       if (i == 6) snprintf(l, sizeof l, "%d / %d", val[i], g->balloons_total);
       else snprintf(l, sizeof l, "%d", val[i]);
-      utext_s(r, 330 - utext_w(r, l, 2), yy, l, 2, 255, 236, 120, 255);
+      utext_o(r, 328 - utext_w(r, l, 2), yy, l, 2, 30, 40, 90, 255, 255, 255, 255);
     }
     snprintf(l, sizeof l, "%ld", g->score);
-    utext_s(r, 360, 168, "SCORE", 1, 190, 190, 210, 255);
-    utext_s(r, SCR_W - 74 - utext_w(r, l, 4), 190, l, 4, 255, 236, 120, 255);
-    soul_gauge(r, 360, 270, SCR_W - 74 - 360, 22, g);
+    utext_o(r, 372, 148, "SCORE", 1, 30, 40, 90, 255, 255, 255, 255);
+    utext_o(r, SCR_W - 82 - utext_w(r, l, 4), 172, l, 4, 255, 236, 100, 150, 70, 0, 255);
+    soul_gauge(r, 376, 270, SCR_W - 82 - 376, 22, g);
     snprintf(l, sizeof l, "%d%%", (int)lround(g->gauge));
-    utext_s(r, SCR_W - 74 - utext_w(r, l, 2), 300, l, 2, 255, 255, 255, 255);
-    utext_s(r, SCR_W / 2 - utext_w(r, "PRESS A", 2) / 2, SCR_H - 92, "PRESS A", 2, 255, 255, 255, 255);
+    utext_o(r, SCR_W - 82 - utext_w(r, l, 2), 306, l, 2, 30, 40, 90, 255, 255, 255, 255);
+    utext_o(r, SCR_W / 2 - utext_w(r, "PRESS A", 2) / 2, SCR_H - 82, "PRESS A", 2, 255, 255, 255, 30, 60, 130, 255);
   }
 }
 
@@ -1225,30 +1460,30 @@ typedef struct {
 static void draw_menu(SDL_Renderer *ren, int sel, int top, int rows, int items, const int *cidx) {
   SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
   double t = (double)mono_ns() / 1e9;
-  gradient(ren, 0, SCR_H, 18, 22, 50, 42, 16, 58);
-  for (int i = 0; i < 12; i++) { /* slow drifting stripes */
-    float sx = fmodf((float)i * 64.0f + (float)(t * 14.0), 700.0f) - 30.0f;
-    col(ren, 255, 255, 255, 10);
-    rect(ren, sx, 70, 24, SCR_H - 100);
-  }
-  col(ren, 0, 0, 0, 150);
+  sky(ren, t, 0, 0);
+  col(ren, 14, 22, 58, 215);
   rect(ren, 0, 0, SCR_W, 62);
-  utext_s(ren, 16, 12, "TAIKO", 4, 255, 214, 60, 255);
+  col(ren, 255, 255, 255, 70);
+  rect(ren, 0, 60, SCR_W, 2);
+  utext_o(ren, 16, 12, "TAIKO", 4, 255, 224, 70, 150, 60, 0, 255);
   char l[96];
   snprintf(l, sizeof l, "judge %+d ms   visual %+d ms", g_offset_ms, (int)lround(g_vis_off * 1000.0));
-  utext(ren, SCR_W - 16 - utext_w(ren, l, 1), 22, l, 1, 190, 190, 205, 255);
+  utext(ren, SCR_W - 16 - utext_w(ren, l, 1), 22, l, 1, 214, 220, 240, 255);
 
-  const int x_list = 20, x_badge = 440, row_h = 30, y0 = 74;
+  const int x_list = 20, x_badge = 440, row_h = 30, y0 = 72;
   for (int r = 0; r < rows && top + r < items; r++) {
     int it = top + r, y = y0 + r * row_h;
     if (it == sel) {
-      col(ren, 255, 255, 255, 38);
+      col(ren, 14, 22, 58, 190);
       rect(ren, 8, (float)y - 3, SCR_W - 16, row_h - 2);
-      col(ren, 250, 200, 40, 255);
-      rect(ren, 8, (float)y - 3, 4, row_h - 2);
+      col(ren, 255, 214, 60, 255);
+      rect(ren, 8, (float)y - 3, 5, row_h - 2);
+    } else {
+      col(ren, 14, 22, 58, 90);
+      rect(ren, 8, (float)y - 3, SCR_W - 16, row_h - 2);
     }
     if (it == 0) {
-      utext_s(ren, x_list, y + 2, "[ Calibration ]", 2, 130, 240, 150, 255);
+      utext_o(ren, x_list, y + 2, "[ Calibration ]", 2, 150, 255, 170, 10, 70, 30, 255);
       continue;
     }
     const Song *s = &songs[it - 1];
@@ -1259,11 +1494,12 @@ static void draw_menu(SDL_Renderer *ren, int sel, int top, int rows, int items, 
       double off = fmod(t * 45.0, (double)(w + gap));
       SDL_Rect clip = {x_list, y - 2, maxw, row_h};
       SDL_SetRenderClipRect(ren, &clip);
-      utext_s(ren, x_list - (int)off, y + 2, s->label, 2, 255, 255, 255, 255);
-      utext_s(ren, x_list - (int)off + w + gap, y + 2, s->label, 2, 255, 255, 255, 255);
+      utext_o(ren, x_list - (int)off, y + 2, s->label, 2, 255, 255, 255, 14, 22, 58, 255);
+      utext_o(ren, x_list - (int)off + w + gap, y + 2, s->label, 2, 255, 255, 255, 14, 22, 58, 255);
       SDL_SetRenderClipRect(ren, NULL);
     } else {
-      utext_fit(ren, x_list, y + 2, maxw, s->label, 2, it == sel ? 255 : 205, it == sel ? 255 : 205, it == sel ? 255 : 215);
+      utext_fit(ren, x_list, y + 2, maxw, s->label, 2, it == sel ? 255 : 225, it == sel ? 255 : 225,
+                it == sel ? 255 : 235);
     }
     /* fixed-width course column: it can never be covered by a title */
     int id = s->ids[cidx[it - 1]];
@@ -1272,16 +1508,16 @@ static void draw_menu(SDL_Renderer *ren, int sel, int top, int rows, int items, 
     course_rgb(id, &R, &G, &B);
     snprintf(l, sizeof l, "%s \xE2\x98\x85%d", course_name(id), c ? c->level : 0);
     pill(ren, x_badge + 22, y, 150, 22, R, G, B);
-    utext(ren, x_badge + 22 + 75 - utext_w(ren, l, 1) / 2, y + 3, l, 1, 255, 255, 255, 255);
+    utext_o(ren, x_badge + 22 + 75 - utext_w(ren, l, 1) / 2, y + 3, l, 1, 255, 255, 255, 60, 20, 30, 255);
     if (it == sel) {
-      utext_s(ren, x_badge, y + 3, "<", 2, 255, 214, 60, 255);
-      utext_s(ren, x_badge + 22 + 150 + 4, y + 3, ">", 2, 255, 214, 60, 255);
+      utext_o(ren, x_badge, y + 3, "<", 2, 255, 224, 70, 14, 22, 58, 255);
+      utext_o(ren, x_badge + 22 + 150 + 4, y + 3, ">", 2, 255, 224, 70, 14, 22, 58, 255);
     }
   }
-  if (n_songs == 0) utext_s(ren, 20, 110, "no songs found", 2, 255, 255, 255, 255);
-  col(ren, 0, 0, 0, 150);
+  if (n_songs == 0) utext_o(ren, 20, 110, "no songs found", 2, 255, 255, 255, 14, 22, 58, 255);
+  col(ren, 14, 22, 58, 215);
   rect(ren, 0, SCR_H - 26, SCR_W, 26);
-  utext(ren, 12, SCR_H - 22, "UP/DOWN song   LEFT/RIGHT course   A play   SELECT+START quit", 1, 190, 190, 205, 255);
+  utext(ren, 12, SCR_H - 22, "UP/DOWN song   LEFT/RIGHT course   A play   SELECT+START quit", 1, 214, 220, 240, 255);
 }
 
 static Choice menu_run(SDL_Renderer *ren, int *sel_io, int *cidx) {
