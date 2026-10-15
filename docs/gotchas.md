@@ -382,10 +382,11 @@ matching heading (or a new one), with the date when it is a measurement.
   controls appear as boxes. The UI and terminal CLI also share a profile lock;
   close the reviewer before running terminal sync against the same collection.
 
-## Taiko / game audio latency (taiko-probe)
+## Taiko / game audio latency
 
-Measured 2026-10-15 with `apps/taiko` (`scripts/build-port.sh taiko-probe`,
-Homebrew > Taiko Probe), SDL3 audio over ALSA dmix, 48 kHz S16 stereo.
+Measured 2026-10-15 with a throwaway SDL3 latency probe (removed afterwards;
+`git show 0076201:apps/taiko/src/probe.c`), audio over ALSA dmix, 48 kHz S16
+stereo.
 
 - The system dmix (`/storage/.config/asound.conf`) is pinned to period 1024 /
   buffer 4096 @ 44.1 kHz. SDL's sample-frames hint cannot change it, so SDL
@@ -414,6 +415,21 @@ Homebrew > Taiko Probe), SDL3 audio over ALSA dmix, 48 kHz S16 stereo.
   trigger hit sounds from a dedicated input thread.
 - `/proc/asound/card0/pcm0p/sub0/status` is useless for dmix (appl_ptr stays 0,
   delay negative); measure queue depth from SDL callback bursts instead.
+- Input path (2026-10-15, evdev with `EVIOCSCLOCKID` = `CLOCK_MONOTONIC`, 80
+  taps): kernel timestamp age at read is median 0.09 ms, max 0.97 ms, so a
+  dedicated evdev thread is accurate; polling the gamepad once per frame
+  (vsync) adds up to 16.7 ms and was measured at ~18 ms. The gamepad is
+  `event3` "OpenSimHardware OSH PB Controller": buttons 304..319, D-pad is the
+  hat axis `ABS_HAT0X/Y` (0x10/0x11), L2/R2 are keys 314/315.
+- Tap calibration (100 BPM clicks, 13 taps): median -109 ms, spread -40..-178.
+  A physical model of this ALSA path predicts roughly -30..+30 ms including a
+  normal human tapping lead, so ~80 ms is unexplained; treat the judgement
+  offset as empirical. Keep it separate from the visual offset: adding the
+  tapping habit to the drawn notes detached them from the sound. Pinning it
+  down needs an external measurement (high-speed camera on screen + speaker).
+- Hit sounds: a 150 Hz "don" is nearly inaudible on the handheld's speaker
+  (suspected, not proven); use a pitch drop from ~760 to 200 Hz plus a click.
+  The session log prints how many sounds were started.
 
 ## TJA charts (apps/taiko)
 

@@ -40,13 +40,18 @@ Open work and what is already done. Facts learned along the way go in
 
 ### Taiko (TJA player)
 
-- [x] Phase 0: audio/input latency probe; ALSA 512/1536 chosen (see
-  `docs/gotchas.md`, Taiko / game audio latency)
-- [x] Phase 1: `.tja` parser and timeline compiler (`apps/taiko/src/tja.c`),
-  `tools/tja_dump.c`, `tools/check_timeline.py`; branches keep `#N` only
-- [ ] Phase 2: playable single song (audio clock master, event timestamps)
-- [ ] Phase 3: song select, scoring, results, calibration; sync script
-  (convert Shift-JIS to UTF-8 on the Mac)
+- [x] Latency probe: ALSA 512/1536 chosen (see `docs/gotchas.md`, Taiko / game
+  audio latency); the probe was removed afterwards
+- [x] `.tja` parser and timeline compiler, judgement engine, host tests
+- [x] Playable on device: menu (song, course), calibration (judgement and
+  visual offset), results, don/ka sounds, D-pad as don
+- [ ] Song titles in Japanese/Chinese (reuse `unifont.bin`)
+- [ ] Pause, retry from the results screen, remember the last song
+- [ ] Wrong-colour hit = bad, big notes needing two hits, per-difficulty
+  judgement windows, exact score rules, soul gauge and clear/fail
+- [ ] Branches (`#N/#E/#M` follow the player), `#NEXTSONG` medleys/dan
+- [ ] Song sync script (convert Shift-JIS charts to UTF-8 on the Mac)
+- [ ] Measure true audio latency externally to explain the ~-100 ms tap offset
 
 ## Done
 
