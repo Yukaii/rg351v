@@ -1465,25 +1465,27 @@ static void draw_menu(SDL_Renderer *ren, int sel, int top, int rows, int items, 
   rect(ren, 0, 0, SCR_W, 62);
   col(ren, 255, 255, 255, 70);
   rect(ren, 0, 60, SCR_W, 2);
-  utext_o(ren, 16, 12, "TAIKO", 4, 255, 224, 70, 150, 60, 0, 255);
+  utext_o(ren, 16, 6, "TAIKO", 3, 255, 224, 70, 150, 60, 0, 255); /* 48 px: inside the 62 px band */
   char l[96];
   snprintf(l, sizeof l, "judge %+d ms   visual %+d ms", g_offset_ms, (int)lround(g_vis_off * 1000.0));
   utext(ren, SCR_W - 16 - utext_w(ren, l, 1), 22, l, 1, 214, 220, 240, 255);
 
-  const int x_list = 20, x_badge = 440, row_h = 30, y0 = 72;
+  /* a row must hold the 32 px tall text (scale 2) with a margin, and the
+   * badge and the text share the row's centre line */
+  const int x_list = 20, x_badge = 440, row_h = 36, y0 = 68, band = row_h - 2, ty = 1, by = 6;
   for (int r = 0; r < rows && top + r < items; r++) {
     int it = top + r, y = y0 + r * row_h;
     if (it == sel) {
       col(ren, 14, 22, 58, 190);
-      rect(ren, 8, (float)y - 3, SCR_W - 16, row_h - 2);
+      rect(ren, 8, (float)y, SCR_W - 16, (float)band);
       col(ren, 255, 214, 60, 255);
-      rect(ren, 8, (float)y - 3, 5, row_h - 2);
+      rect(ren, 8, (float)y, 5, (float)band);
     } else {
       col(ren, 14, 22, 58, 90);
-      rect(ren, 8, (float)y - 3, SCR_W - 16, row_h - 2);
+      rect(ren, 8, (float)y, SCR_W - 16, (float)band);
     }
     if (it == 0) {
-      utext_o(ren, x_list, y + 2, "[ Calibration ]", 2, 150, 255, 170, 10, 70, 30, 255);
+      utext_o(ren, x_list, y + ty, "[ Calibration ]", 2, 150, 255, 170, 10, 70, 30, 255);
       continue;
     }
     const Song *s = &songs[it - 1];
@@ -1492,13 +1494,13 @@ static void draw_menu(SDL_Renderer *ren, int sel, int top, int rows, int items, 
       /* the selected title scrolls instead of being cut off */
       int w = utext_w(ren, s->label, 2), gap = 80;
       double off = fmod(t * 45.0, (double)(w + gap));
-      SDL_Rect clip = {x_list, y - 2, maxw, row_h};
+      SDL_Rect clip = {x_list, y, maxw, band};
       SDL_SetRenderClipRect(ren, &clip);
-      utext_o(ren, x_list - (int)off, y + 2, s->label, 2, 255, 255, 255, 14, 22, 58, 255);
-      utext_o(ren, x_list - (int)off + w + gap, y + 2, s->label, 2, 255, 255, 255, 14, 22, 58, 255);
+      utext_o(ren, x_list - (int)off, y + ty, s->label, 2, 255, 255, 255, 14, 22, 58, 255);
+      utext_o(ren, x_list - (int)off + w + gap, y + ty, s->label, 2, 255, 255, 255, 14, 22, 58, 255);
       SDL_SetRenderClipRect(ren, NULL);
     } else {
-      utext_fit(ren, x_list, y + 2, maxw, s->label, 2, it == sel ? 255 : 225, it == sel ? 255 : 225,
+      utext_fit(ren, x_list, y + ty, maxw, s->label, 2, it == sel ? 255 : 225, it == sel ? 255 : 225,
                 it == sel ? 255 : 235);
     }
     /* fixed-width course column: it can never be covered by a title */
@@ -1507,11 +1509,11 @@ static void draw_menu(SDL_Renderer *ren, int sel, int top, int rows, int items, 
     int R, G, B;
     course_rgb(id, &R, &G, &B);
     snprintf(l, sizeof l, "%s \xE2\x98\x85%d", course_name(id), c ? c->level : 0);
-    pill(ren, x_badge + 22, y, 150, 22, R, G, B);
-    utext_o(ren, x_badge + 22 + 75 - utext_w(ren, l, 1) / 2, y + 3, l, 1, 255, 255, 255, 60, 20, 30, 255);
+    pill(ren, x_badge + 22, y + by, 150, 22, R, G, B);
+    utext_o(ren, x_badge + 22 + 75 - utext_w(ren, l, 1) / 2, y + by + 3, l, 1, 255, 255, 255, 60, 20, 30, 255);
     if (it == sel) {
-      utext_o(ren, x_badge, y + 3, "<", 2, 255, 224, 70, 14, 22, 58, 255);
-      utext_o(ren, x_badge + 22 + 150 + 4, y + 3, ">", 2, 255, 224, 70, 14, 22, 58, 255);
+      utext_o(ren, x_badge, y + ty, "<", 2, 255, 224, 70, 14, 22, 58, 255);
+      utext_o(ren, x_badge + 22 + 150 + 4, y + ty, ">", 2, 255, 224, 70, 14, 22, 58, 255);
     }
   }
   if (n_songs == 0) utext_o(ren, 20, 110, "no songs found", 2, 255, 255, 255, 14, 22, 58, 255);
@@ -1524,7 +1526,7 @@ static Choice menu_run(SDL_Renderer *ren, int *sel_io, int *cidx) {
   Choice ch = {0, 0, -1, 0};
   int sel = *sel_io, top = 0, bsel = 0, bstart = 0;
   int items = n_songs + 1; /* item 0 = calibration */
-  const int rows = 12;
+  const int rows = 10;
   while (!quit_flag) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
