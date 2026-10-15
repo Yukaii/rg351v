@@ -315,7 +315,6 @@ static void text_c(SDL_Renderer *r, float cx, float y, float s, const char *str)
  * kanji render; without the file it falls back to SDL's ASCII debug font. */
 static uint32_t *uf_index; /* 65536 entries, see apps/ptterm/tools/gen-assets.py */
 static const uint8_t *uf_blob;
-static SDL_Texture *gcache[65536];
 
 static int load_font(const char *dir) {
   char path[1100];
@@ -356,41 +355,29 @@ static int u8_next(const char *s, uint32_t *cp) {
   return 1;
 }
 
-static SDL_Texture *glyph_tex(SDL_Renderer *r, uint32_t cp, int *wide) {
-  *wide = 0;
-  if (cp >= 0x10000 || !uf_index) return NULL;
-  uint32_t ent = uf_index[cp];
-  if (!ent) return NULL;
-  *wide = (ent & 0x80000000u) != 0;
-  if (gcache[cp]) return gcache[cp];
-  const uint8_t *g = uf_blob + ((ent & 0x7FFFFFFF) - 1);
-  int w = *wide ? 16 : 8;
-  uint32_t px[16 * 16];
-  memset(px, 0, sizeof px);
-  for (int row = 0; row < 16; row++) {
-    uint32_t bits = *wide ? (uint32_t)(g[row * 2] << 8 | g[row * 2 + 1]) : g[row];
-    for (int x = 0; x < w; x++)
-      if ((bits >> (w - 1 - x)) & 1) px[row * w + x] = 0xFFFFFFFFu;
-  }
-  SDL_Surface *sf = SDL_CreateSurfaceFrom(w, 16, SDL_PIXELFORMAT_RGBA32, px, w * 4);
+static SDL_Texture *tex_from_text(SDL_Renderer *r, Uint32 *px, int w, int h) {
+  SDL_Surface *sf = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_RGBA32, px, w * 4);
   SDL_Texture *t = sf ? SDL_CreateTextureFromSurface(r, sf) : NULL;
   if (sf) SDL_DestroySurface(sf);
   if (t) {
-    SDL_SetTextureScaleMode(t, SDL_SCALEMODE_NEAREST);
     SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureScaleMode(t, SDL_SCALEMODE_NEAREST);
   }
-  gcache[cp] = t;
   return t;
 }
 
+static int glyph_adv(uint32_t cp, int scale) {
+  if (cp < 0x10000 && uf_index && uf_index[cp] && (uf_index[cp] & 0x80000000u)) return 16 * scale;
+  return 8 * scale;
+}
+
 static int utext_w(SDL_Renderer *r, const char *s, int scale) {
+  (void)r;
   int w = 0;
   while (*s) {
     uint32_t cp;
     s += u8_next(s, &cp);
-    int wide;
-    glyph_tex(r, cp, &wide);
-    w += (wide ? 16 : 8) * scale;
+    w += glyph_adv(cp, scale);
   }
   return w;
 }
@@ -401,46 +388,181 @@ static void ascii(const char *in, char *out, size_t cap) {
   out[j] = 0;
 }
 
-static void utext(SDL_Renderer *r, int x, int y, const char *s, int scale, Uint8 R, Uint8 G, Uint8 B, Uint8 A) {
-  if (!uf_index) {
-    char a[200];
-    ascii(s, a, sizeof a);
-    SDL_SetRenderDrawColor(r, R, G, B, A);
-    text(r, (float)x, (float)y, (float)scale, a);
-    return;
-  }
-  while (*s) {
+/* Glyph-by-glyph drawing: only the fallback when the font is missing. */
+static void utext_raw(SDL_Renderer *r, int x, int y, const char *s, int scale, Uint8 R, Uint8 G, Uint8 B, Uint8 A) {
+  char a[200];
+  ascii(s, a, sizeof a);
+  SDL_SetRenderDrawColor(r, R, G, B, A);
+  text(r, (float)x, (float)y, (float)scale, a);
+}
+
+/* Text is rasterised once per (string, size, colours) into one texture. A
+ * frame used to issue hundreds of per-glyph draws (and nine per glyph for an
+ * outline), each switching texture, which the Mali GPU cannot keep at 60 fps. */
+enum { TM_PLAIN = 0, TM_SHADOW = 1, TM_OUTLINE = 2 };
+typedef struct {
+  SDL_Texture *tex;
+  char str[104];
+  int scale, mode, pad;
+  Uint8 R, G, B, oR, oG, oB;
+  unsigned used;
+} TextEntry;
+#define TC_N 192
+static TextEntry tcache[TC_N];
+static unsigned tc_clock;
+
+static SDL_Texture *text_make(SDL_Renderer *r, const char *s, int scale, int mode, Uint8 R, Uint8 G, Uint8 B, Uint8 oR,
+                              Uint8 oG, Uint8 oB, int *pad_out) {
+  int tw = utext_w(r, s, scale);
+  int o = mode == TM_OUTLINE ? (scale > 2 ? 2 : 1) : 0;
+  int pad = o + (mode == TM_SHADOW ? scale : 0) + 1;
+  int W = tw + 2 * pad + scale, H = 16 * scale + 2 * pad + scale;
+  uint8_t *mask = calloc((size_t)W * (size_t)H, 1);
+  uint32_t *px = calloc((size_t)W * (size_t)H, sizeof *px);
+  int x = pad;
+  const char *p = s;
+  while (*p) {
     uint32_t cp;
-    s += u8_next(s, &cp);
-    int wide;
-    SDL_Texture *t = glyph_tex(r, cp, &wide);
-    int adv = (wide ? 16 : 8) * scale;
-    if (t) {
-      SDL_SetTextureColorMod(t, R, G, B);
-      SDL_SetTextureAlphaMod(t, A);
-      SDL_FRect d = {(float)x, (float)y, (float)adv, (float)(16 * scale)};
-      SDL_RenderTexture(r, t, NULL, &d);
+    p += u8_next(p, &cp);
+    int wide = 0;
+    int adv = 8 * scale;
+    if (cp < 0x10000 && uf_index && uf_index[cp]) {
+      uint32_t ent = uf_index[cp];
+      wide = (ent & 0x80000000u) != 0;
+      adv = (wide ? 16 : 8) * scale;
+      const uint8_t *g = uf_blob + ((ent & 0x7FFFFFFF) - 1);
+      int w = wide ? 16 : 8;
+      for (int row = 0; row < 16; row++) {
+        uint32_t bits = wide ? (uint32_t)(g[row * 2] << 8 | g[row * 2 + 1]) : g[row];
+        for (int c = 0; c < w; c++) {
+          if (!((bits >> (w - 1 - c)) & 1)) continue;
+          for (int dy = 0; dy < scale; dy++)
+            for (int dx = 0; dx < scale + 1; dx++) { /* +1 px: the slightly bold look */
+              int xx = x + c * scale + dx, yy = pad + row * scale + dy;
+              if (xx < W && yy < H) mask[yy * W + xx] = 1;
+            }
+        }
+      }
     }
     x += adv;
   }
+  for (int y = 0; y < H; y++) {
+    for (int xx = 0; xx < W; xx++) {
+      Uint32 c = 0;
+      if (mask[y * W + xx]) {
+        c = (Uint32)R | (Uint32)G << 8 | (Uint32)B << 16 | 0xFF000000u;
+      } else {
+        int hit = 0;
+        if (mode == TM_OUTLINE) {
+          for (int dy = -o; dy <= o && !hit; dy++)
+            for (int dx = -o; dx <= o; dx++) {
+              int yy = y + dy, x2 = xx + dx;
+              if (yy >= 0 && yy < H && x2 >= 0 && x2 < W && mask[yy * W + x2]) {
+                hit = 1;
+                break;
+              }
+            }
+          if (hit) c = (Uint32)oR | (Uint32)oG << 8 | (Uint32)oB << 16 | 0xFF000000u;
+        } else if (mode == TM_SHADOW) {
+          int yy = y - scale, x2 = xx - scale;
+          if (yy >= 0 && x2 >= 0 && mask[yy * W + x2]) c = 0xC0000000u; /* black, 75% */
+        }
+      }
+      px[y * W + xx] = c;
+    }
+  }
+  SDL_Texture *t = tex_from_text(r, px, W, H);
+  free(mask);
+  free(px);
+  *pad_out = pad;
+  return t;
+}
+
+static void utext_cached(SDL_Renderer *r, int x, int y, const char *s, int scale, int mode, Uint8 R, Uint8 G, Uint8 B,
+                         Uint8 oR, Uint8 oG, Uint8 oB, Uint8 A) {
+  if (!uf_index || !s[0]) {
+    if (!uf_index) utext_raw(r, x, y, s, scale, R, G, B, A);
+    return;
+  }
+  TextEntry *hit = NULL, *lru = &tcache[0];
+  for (int i = 0; i < TC_N; i++) {
+    TextEntry *e = &tcache[i];
+    if (e->tex && e->scale == scale && e->mode == mode && e->R == R && e->G == G && e->B == B && e->oR == oR &&
+        e->oG == oG && e->oB == oB && !strcmp(e->str, s)) {
+      hit = e;
+      break;
+    }
+    if (!e->tex || e->used < lru->used) lru = e;
+  }
+  if (!hit) {
+    if (strlen(s) >= sizeof hit->str) { /* too long to cache: never needed in practice */
+      char cut[sizeof hit->str];
+      memcpy(cut, s, sizeof cut - 1);
+      cut[sizeof cut - 1] = 0;
+      utext_cached(r, x, y, cut, scale, mode, R, G, B, oR, oG, oB, A);
+      return;
+    }
+    if (lru->tex) SDL_DestroyTexture(lru->tex);
+    int pad;
+    lru->tex = text_make(r, s, scale, mode, R, G, B, oR, oG, oB, &pad);
+    snprintf(lru->str, sizeof lru->str, "%s", s);
+    lru->scale = scale;
+    lru->mode = mode;
+    lru->pad = pad;
+    lru->R = R, lru->G = G, lru->B = B, lru->oR = oR, lru->oG = oG, lru->oB = oB;
+    hit = lru;
+  }
+  hit->used = ++tc_clock;
+  if (!hit->tex) return;
+  float tw, th;
+  SDL_GetTextureSize(hit->tex, &tw, &th);
+  SDL_SetTextureAlphaMod(hit->tex, A);
+  SDL_FRect d = {(float)(x - hit->pad), (float)(y - hit->pad), tw, th};
+  SDL_RenderTexture(r, hit->tex, NULL, &d);
+}
+
+static void utext(SDL_Renderer *r, int x, int y, const char *s, int scale, Uint8 R, Uint8 G, Uint8 B, Uint8 A) {
+  utext_cached(r, x, y, s, scale, TM_PLAIN, R, G, B, 0, 0, 0, A);
 }
 
 /* shadowed, slightly emboldened text */
 static void utext_s(SDL_Renderer *r, int x, int y, const char *s, int scale, Uint8 R, Uint8 G, Uint8 B, Uint8 A) {
-  utext(r, x + scale, y + scale, s, scale, 0, 0, 0, (Uint8)(A * 3 / 4));
-  utext(r, x + 1, y, s, scale, R, G, B, A);
-  utext(r, x, y, s, scale, R, G, B, A);
+  utext_cached(r, x, y, s, scale, TM_SHADOW, R, G, B, 0, 0, 0, A);
 }
 
-/* thick outline: the text stamped around itself in the outline colour */
+/* thick outline around the text */
 static void utext_o(SDL_Renderer *r, int x, int y, const char *s, int scale, Uint8 R, Uint8 G, Uint8 B, Uint8 oR,
                     Uint8 oG, Uint8 oB, Uint8 A) {
-  int o = scale > 2 ? 2 : 1;
-  for (int dy = -o; dy <= o; dy++)
-    for (int dx = -o; dx <= o; dx++)
-      if (dx || dy) utext(r, x + dx, y + dy, s, scale, oR, oG, oB, A);
-  utext(r, x, y, s, scale, R, G, B, A);
-  utext(r, x + 1, y, s, scale, R, G, B, A);
+  utext_cached(r, x, y, s, scale, TM_OUTLINE, R, G, B, oR, oG, oB, A);
+}
+
+/* Numbers (score, combo, counters) change constantly: draw them digit by digit
+ * from ten cached glyph textures instead of rasterising a new string per value. */
+static int num_w(long v, int scale) {
+  char b[24];
+  snprintf(b, sizeof b, "%ld", v);
+  return (int)strlen(b) * 8 * scale;
+}
+
+static void draw_num(SDL_Renderer *r, int x, int y, long v, int scale, Uint8 R, Uint8 G, Uint8 B, Uint8 oR, Uint8 oG,
+                     Uint8 oB) {
+  char b[24];
+  snprintf(b, sizeof b, "%ld", v);
+  for (const char *p = b; *p; p++, x += 8 * scale) {
+    char one[2] = {*p, 0};
+    utext_cached(r, x, y, one, scale, TM_OUTLINE, R, G, B, oR, oG, oB, 255);
+  }
+}
+
+/* Text that changes while playing (the status line) is drawn character by
+ * character from prewarmed single-glyph textures: creating or destroying a
+ * texture mid-song stalls the Mali driver for 100+ ms. */
+static void utext_chars(SDL_Renderer *r, int x, int y, const char *s, int scale, Uint8 R, Uint8 G, Uint8 B, Uint8 A) {
+  for (; *s; s++, x += 8 * scale) {
+    if (*s == ' ') continue;
+    char one[2] = {*s, 0};
+    utext_cached(r, x, y, one, scale, TM_PLAIN, R, G, B, 0, 0, 0, A);
+  }
 }
 
 /* fit into maxw pixels: cut and end with "..." when too long */
@@ -454,9 +576,8 @@ static void utext_fit(SDL_Renderer *r, int x, int y, int maxw, const char *s, in
   int w = 0, dots = utext_w(r, "...", scale);
   while (*s && n + 8 < sizeof buf) {
     uint32_t cp;
-    int len = u8_next(s, &cp), wide;
-    glyph_tex(r, cp, &wide);
-    int adv = (wide ? 16 : 8) * scale;
+    int len = u8_next(s, &cp);
+    int adv = glyph_adv(cp, scale);
     if (w + adv + dots > maxw) break;
     memcpy(buf + n, s, (size_t)len);
     n += (size_t)len;
@@ -749,22 +870,66 @@ static void soul_gauge(SDL_Renderer *r, int x, int y, int w, int h, const Game *
   rect(r, (float)x + (float)clear * cw - 1, (float)y - 5, 2, (float)h + 10);
 }
 
-/* sky background shared by the menu and the play screen */
-static void sky(SDL_Renderer *r, double t, float pulse, int gogo) {
-  gradient(r, 0, SCR_H, gogo ? 120 : 92, gogo ? 150 : 170, gogo ? 214 : 236, gogo ? 255 : 208, gogo ? 214 : 234,
-           gogo ? 226 : 252);
-  if (pulse > 0) {
-    col(r, 255, 255, 255, (int)(pulse * 26));
-    rect(r, 0, 0, SCR_W, SCR_H);
+/* ---- baked scene -------------------------------------------------------- */
+/* Static layers are drawn once at start-up into textures; a frame then needs a
+ * handful of draws instead of ~1,500 small rectangles. */
+typedef struct {
+  SDL_Texture *bg[2];   /* sky gradient: normal, GOGO TIME */
+  SDL_Texture *hills;
+  SDL_Texture *glow;    /* GOGO lane glow, 640 x LANE_H */
+  SDL_Texture *drum[3]; /* idle, ka (rim) lit, don (head) lit; 100 x 100 */
+  SDL_Texture *target;  /* judgement ring, 100 x 100 */
+  SDL_Texture *hitring; /* ring sprite, scaled for the hit effect, 80 x 80 */
+  int ready;
+} Scene;
+static Scene scn;
+
+static SDL_Texture *bake_begin(SDL_Renderer *r, int w, int h) {
+  SDL_Texture *t = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_TARGET, w, h);
+  if (!t) return NULL;
+  SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+  SDL_SetTextureScaleMode(t, SDL_SCALEMODE_NEAREST);
+  SDL_SetRenderTarget(r, t);
+  SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+  SDL_SetRenderDrawColor(r, 0, 0, 0, 0);
+  SDL_RenderClear(r);
+  return t;
+}
+
+static void bake_end(SDL_Renderer *r) { SDL_SetRenderTarget(r, NULL); }
+
+static void draw_drum(SDL_Renderer *r, float cx, float cy, int hit_ka, int hit_don) {
+  col(r, 0, 0, 0, 255);
+  fill_circle(r, cx, cy, 47);
+  col(r, 214, 218, 232, 255);
+  fill_circle(r, cx, cy, 45);
+  if (hit_ka) col(r, 150, 220, 255, 255);
+  else col(r, 36, 108, 214, 255);
+  fill_circle(r, cx, cy, 41);
+  for (int k = 0; k < 12; k++) {
+    float a = (float)k * 0.5236f;
+    col(r, 250, 250, 255, 255);
+    fill_circle(r, cx + 37.0f * cosf(a), cy + 37.0f * sinf(a), 2);
   }
-  sprites_init(r);
-  static const float CL[6][3] = {{0.0f, 300, 0.9f}, {150.0f, 372, 1.15f}, {300.0f, 330, 0.8f},
-                                 {450.0f, 410, 1.3f}, {600.0f, 280, 0.7f}, {760.0f, 360, 1.0f}};
-  for (int i = 0; i < 6; i++) {
-    float x = fmodf(CL[i][0] + (float)(t * (6.0 + 4.0 * CL[i][2])), 820.0f) - 90.0f;
-    blit(r, spr.cloud, x, CL[i][1], CL[i][2], 255, 235);
+  col(r, 244, 238, 222, 255);
+  fill_circle(r, cx, cy, 30);
+  col(r, 0, 0, 0, 90);
+  fill_circle(r, cx, cy + 2, 21);
+  if (hit_don) col(r, 255, 120, 96, 255);
+  else col(r, 226, 48, 36, 255);
+  fill_circle(r, cx, cy, 20);
+  col(r, 255, 255, 255, 90);
+  fill_circle(r, cx - 6, cy - 7, 6);
+}
+
+static void scene_init(SDL_Renderer *r) {
+  if (scn.ready) return;
+  for (int g = 0; g < 2; g++) {
+    scn.bg[g] = bake_begin(r, SCR_W, SCR_H);
+    gradient(r, 0, SCR_H, g ? 120 : 92, g ? 150 : 170, g ? 214 : 236, g ? 255 : 208, g ? 214 : 234, g ? 226 : 252);
+    bake_end(r);
   }
-  /* rolling hills */
+  scn.hills = bake_begin(r, SCR_W, SCR_H);
   for (int x = 0; x < SCR_W; x += 8) {
     float h = 34.0f + 14.0f * sinf((float)x / 70.0f + 0.7f) + 8.0f * sinf((float)x / 23.0f);
     col(r, 112, 196, 140, 255);
@@ -775,6 +940,57 @@ static void sky(SDL_Renderer *r, double t, float pulse, int gogo) {
     col(r, 70, 160, 120, 255);
     rect(r, (float)x, SCR_H - h, 8, h);
   }
+  bake_end(r);
+  scn.glow = bake_begin(r, SCR_W, LANE_H);
+  for (int x = 0; x < SCR_W; x += 4) {
+    float k = clamp01f((float)(x - (JX - 20)) / 460.0f);
+    RGBf cc = k < 0.4f ? mixc(rgbf(255, 70, 190), rgbf(255, 236, 140), k / 0.4f) : rgbf(255, 244, 190);
+    float a = 0.98f - 0.62f * k;
+    col(r, (int)cc.r, (int)cc.g, (int)cc.b, (int)(a * 255.0f));
+    rect(r, (float)x, 0, 4, LANE_H);
+  }
+  bake_end(r);
+  for (int v = 0; v < 3; v++) {
+    scn.drum[v] = bake_begin(r, 100, 100);
+    draw_drum(r, 50, 50, v == 1, v == 2);
+    bake_end(r);
+  }
+  scn.target = bake_begin(r, 100, 100);
+  col(r, 255, 255, 255, 70);
+  ring(r, 50, 50, 38, 3);
+  col(r, 0, 0, 0, 200);
+  fill_circle(r, 50, 50, 29);
+  col(r, 248, 248, 255, 255);
+  ring(r, 50, 50, 29, 4);
+  bake_end(r);
+  scn.hitring = bake_begin(r, 80, 80);
+  col(r, 255, 255, 255, 255);
+  ring(r, 40, 40, 30, 5);
+  bake_end(r);
+  /* the hit ring is scaled up: smooth it */
+  if (scn.hitring) SDL_SetTextureScaleMode(scn.hitring, SDL_SCALEMODE_LINEAR);
+  scn.ready = 1;
+}
+
+
+/* sky background shared by the menu and the play screen */
+static void sky(SDL_Renderer *r, double t, float pulse, int gogo) {
+  scene_init(r);
+  sprites_init(r);
+  SDL_FRect full = {0, 0, SCR_W, SCR_H};
+  SDL_SetTextureAlphaMod(scn.bg[gogo ? 1 : 0], 255);
+  SDL_RenderTexture(r, scn.bg[gogo ? 1 : 0], NULL, &full);
+  if (pulse > 0) {
+    col(r, 255, 255, 255, (int)(pulse * 26));
+    rect(r, 0, 0, SCR_W, SCR_H);
+  }
+  static const float CL[6][3] = {{0.0f, 300, 0.9f}, {150.0f, 372, 1.15f}, {300.0f, 330, 0.8f},
+                                 {450.0f, 410, 1.3f}, {600.0f, 280, 0.7f}, {760.0f, 360, 1.0f}};
+  for (int i = 0; i < 6; i++) {
+    float x = fmodf(CL[i][0] + (float)(t * (6.0 + 4.0 * CL[i][2])), 820.0f) - 90.0f;
+    blit(r, spr.cloud, x, CL[i][1], CL[i][2], 255, 235);
+  }
+  SDL_RenderTexture(r, scn.hills, NULL, &full);
 }
 
 static void render(SDL_Renderer *r, View *v, double Tj, double T, int result) {
@@ -818,9 +1034,8 @@ static void render(SDL_Renderer *r, View *v, double Tj, double T, int result) {
       const char *p = title;
       while (*p && n + 8 < sizeof buf) {
         uint32_t cp;
-        int len = u8_next(p, &cp), wide;
-        glyph_tex(r, cp, &wide);
-        int adv = (wide ? 16 : 8) * 2;
+        int len = u8_next(p, &cp);
+        int adv = glyph_adv(cp, 2);
         if (w + adv + dots > maxw) break;
         memcpy(buf + n, p, (size_t)len);
         n += (size_t)len;
@@ -838,9 +1053,7 @@ static void render(SDL_Renderer *r, View *v, double Tj, double T, int result) {
   pill(r, 12, 42, bw, 22, cr, cg, cb);
   utext_o(r, 20, 45, badge, 1, 255, 255, 255, 60, 20, 30, 255);
 
-  char sc[32];
-  snprintf(sc, sizeof sc, "%ld", g->score);
-  utext_o(r, SCR_W - 12 - utext_w(r, sc, 3), 0, sc, 3, 255, 255, 255, 214, 120, 10, 255);
+  draw_num(r, SCR_W - 12 - num_w(g->score, 3), 0, g->score, 3, 255, 255, 255, 214, 120, 10);
   utext_o(r, 336, 52, "\xE9\xAD\x82", 1, 255, 236, 120, 120, 30, 10, 255); /* soul */
   soul_gauge(r, 360, 53, 268, 16, g);
 
@@ -851,13 +1064,9 @@ static void render(SDL_Renderer *r, View *v, double Tj, double T, int result) {
   col(r, 30, 24, 40, 255);
   rect(r, 0, LANE_Y, SCR_W, LANE_H);
   if (gogo) {
-    for (int x = 0; x < SCR_W; x += 8) {
-      float k = clamp01f((float)(x - (JX - 20)) / 460.0f);
-      RGBf cc = k < 0.4f ? mixc(rgbf(255, 70, 190), rgbf(255, 236, 140), k / 0.4f) : rgbf(255, 244, 190);
-      float a = (0.98f - 0.62f * k) * (0.88f + 0.12f * pulse);
-      col(r, (int)cc.r, (int)cc.g, (int)cc.b, (int)(a * 255.0f));
-      rect(r, (float)x, LANE_Y, 8, LANE_H);
-    }
+    SDL_FRect gr = {0, LANE_Y, SCR_W, LANE_H};
+    SDL_SetTextureAlphaMod(scn.glow, (Uint8)(255.0f * (0.88f + 0.12f * pulse)));
+    SDL_RenderTexture(r, scn.glow, NULL, &gr);
   }
   col(r, 246, 246, 252, 255);
   rect(r, 0, LANE_Y, SCR_W, 3);
@@ -878,38 +1087,15 @@ static void render(SDL_Renderer *r, View *v, double Tj, double T, int result) {
     rect(r, (float)x, LANE_Y + 3, 2, LANE_H - 6);
   }
 
-  /* taiko: wooden rim with tacks, blue rim (ka) and red head (don) that flash */
+  /* taiko: rim (ka) and head (don) light up on a hit */
   int since = (Tj - g->hit_t < 0.09 && g->hit_t > 0);
   int hit_don = since && g->hit_kind == HIT_DON, hit_ka = since && g->hit_kind == HIT_KA;
-  col(r, 0, 0, 0, 255);
-  fill_circle(r, 62, cy, 47);
-  col(r, 214, 218, 232, 255);
-  fill_circle(r, 62, cy, 45);
-  if (hit_ka) col(r, 150, 220, 255, 255);
-  else col(r, 36, 108, 214, 255);
-  fill_circle(r, 62, cy, 41);
-  for (int k = 0; k < 12; k++) {
-    float a = (float)k * 0.5236f;
-    col(r, 250, 250, 255, 255);
-    fill_circle(r, 62 + 37.0f * cosf(a), cy + 37.0f * sinf(a), 2);
+  {
+    SDL_FRect dr = {62 - 50, cy - 50, 100, 100};
+    SDL_RenderTexture(r, scn.drum[hit_don ? 2 : hit_ka ? 1 : 0], NULL, &dr);
+    SDL_FRect tr = {JX - 50, cy - 50, 100, 100};
+    SDL_RenderTexture(r, scn.target, NULL, &tr);
   }
-  col(r, 244, 238, 222, 255);
-  fill_circle(r, 62, cy, 30);
-  col(r, 0, 0, 0, 90);
-  fill_circle(r, 62, cy + 2, 21);
-  if (hit_don) col(r, 255, 120, 96, 255);
-  else col(r, 226, 48, 36, 255);
-  fill_circle(r, 62, cy, 20);
-  col(r, 255, 255, 255, 90);
-  fill_circle(r, 56, cy - 7, 6);
-
-  /* target ring and its big-note guide */
-  col(r, 255, 255, 255, 70);
-  ring(r, JX, cy, 38, 3);
-  col(r, 0, 0, 0, 200);
-  fill_circle(r, JX, cy, 29);
-  col(r, 248, 248, 255, 255);
-  ring(r, JX, cy, 29, 4);
 
   /* notes, far to near so near ones sit on top */
   size_t last = v->draw_start;
@@ -926,11 +1112,9 @@ static void render(SDL_Renderer *r, View *v, double Tj, double T, int result) {
     if (!(is_b || is_r) || g->done[i] || n->t > T || T > n->end_t) continue;
     int shown = is_b ? n->hits - g->roll_hits[i] : g->roll_hits[i];
     if (is_r && shown == 0) continue;
-    char b[16];
-    snprintf(b, sizeof b, "%d", shown);
     blit(r, spr.bubble, JX + 96, LANE_Y - 22, 0.85f, 255, 255);
-    utext_o(r, JX + 96 - utext_w(r, b, 3) / 2, LANE_Y - 22 - 24, b, 3, is_b ? 255 : 80, is_b ? 110 : 150,
-            is_b ? 10 : 255, 255, 255, 255, 255);
+    draw_num(r, JX + 96 - num_w(shown, 3) / 2, LANE_Y - 22 - 24, shown, 3, is_b ? 255 : 80, is_b ? 110 : 150,
+             is_b ? 10 : 255, 255, 255, 255);
   }
 
   /* judgement: outlined kanji rising off the drum, ring on good/ok */
@@ -946,17 +1130,18 @@ static void render(SDL_Renderer *r, View *v, double Tj, double T, int result) {
             (Uint8)F[g->fb_judge][2], (Uint8)O[g->fb_judge][0], (Uint8)O[g->fb_judge][1], (Uint8)O[g->fb_judge][2],
             (Uint8)a);
     if (g->fb_judge <= J_OK && age < 0.2) {
-      col(r, F[g->fb_judge][0], F[g->fb_judge][1], F[g->fb_judge][2], (int)(230 * (1.0 - age / 0.2)));
-      ring(r, JX, cy, 30 + (int)(age * 150), 5);
+      float sc = (30.0f + (float)age * 150.0f) / 30.0f;
+      SDL_SetTextureColorMod(scn.hitring, (Uint8)F[g->fb_judge][0], (Uint8)F[g->fb_judge][1], (Uint8)F[g->fb_judge][2]);
+      SDL_SetTextureAlphaMod(scn.hitring, (Uint8)(230 * (1.0 - age / 0.2)));
+      SDL_FRect hr = {JX - 40 * sc, cy - 40 * sc, 80 * sc, 80 * sc};
+      SDL_RenderTexture(r, scn.hitring, NULL, &hr);
     }
   }
 
   /* combo under the drum */
   if (g->combo >= 2) {
-    char cb[24];
-    snprintf(cb, sizeof cb, "%d", g->combo);
-    int w = utext_w(r, cb, 5);
-    utext_o(r, 62 - w / 2, LANE_Y + LANE_H + 12, cb, 5, 255, 236, 100, 150, 40, 0, 255);
+    int w = num_w(g->combo, 5);
+    draw_num(r, 62 - w / 2, LANE_Y + LANE_H + 12, g->combo, 5, 255, 236, 100, 150, 40, 0);
     utext_o(r, 62 - utext_w(r, "COMBO", 1) / 2, LANE_Y + LANE_H + 12 + 84, "COMBO", 1, 255, 255, 255, 40, 50, 100, 255);
   }
 
@@ -973,7 +1158,7 @@ static void render(SDL_Renderer *r, View *v, double Tj, double T, int result) {
   char st[120];
   snprintf(st, sizeof st, "judge %+d ms (L2/R2)   %d good  %d ok  %d bad  %d miss", v->offset_ms, g->good, g->ok, g->bad,
            g->miss);
-  utext(r, 8, SCR_H - 24, st, 1, 214, 220, 240, 255);
+  utext_chars(r, 8, SCR_H - 24, st, 1, 214, 220, 240, 255);
 
   if (result) {
     col(r, 8, 16, 48, 150);
@@ -1129,6 +1314,56 @@ static int sdl_hit_kind(int b) {
   }
 }
 
+/* ---- frame timing ------------------------------------------------------- */
+/* Logged per session: with vsync a healthy frame is ~16.7 ms; "late" counts
+ * frames whose interval exceeded 20 ms (a missed vsync). cpu = time spent
+ * issuing draw calls, present = SDL_RenderPresent (flush + vsync wait). */
+#define FT_MAX 6000
+typedef struct {
+  float interval[FT_MAX], cpu[FT_MAX], present[FT_MAX], song_t[FT_MAX], ev[FT_MAX], logic[FT_MAX];
+  int n;
+  uint64_t last_start;
+} FrameTimes;
+
+static int cmp_f(const void *a, const void *b) {
+  float x = *(const float *)a, y = *(const float *)b;
+  return (x > y) - (x < y);
+}
+
+static void ft_report(FrameTimes *f, const char *tag) {
+  if (f->n < 10) return;
+  float tmp[FT_MAX];
+  struct {
+    const char *name;
+    float *v;
+  } sets[3] = {{"interval", f->interval}, {"cpu", f->cpu}, {"present", f->present}};
+  fprintf(stderr, "taiko: frames[%s] n=%d", tag, f->n);
+  for (int k = 0; k < 3; k++) {
+    memcpy(tmp, sets[k].v, (size_t)f->n * sizeof(float));
+    qsort(tmp, (size_t)f->n, sizeof(float), cmp_f);
+    float sum = 0;
+    for (int i = 0; i < f->n; i++) sum += tmp[i];
+    fprintf(stderr, "  %s avg/p50/p95/p99/max=%.1f/%.1f/%.1f/%.1f/%.1f", sets[k].name, sum / (float)f->n,
+            tmp[f->n / 2], tmp[(int)((float)f->n * 0.95f)], tmp[(int)((float)f->n * 0.99f)], tmp[f->n - 1]);
+  }
+  int late = 0, very = 0;
+  for (int i = 0; i < f->n; i++) {
+    if (f->interval[i] > 20.0f) late++;
+    if (f->interval[i] > 34.0f) very++;
+  }
+  fprintf(stderr, "  late(>20ms)=%d very(>34ms)=%d\n", late, very);
+  int shown = 0;
+  for (int i = 0; i < f->n && shown < 10; i++)
+    if (f->interval[i] > 34.0f) {
+      /* interval[i] is how long frame i-1 took: print that frame's stages */
+      int j = i > 0 ? i - 1 : 0;
+      fprintf(stderr,
+              "taiko:   slow frame #%d at song %.2fs took %.1f ms (events %.1f, logic %.1f, draw %.1f, present %.1f)\n", j,
+              f->song_t[j], f->interval[i], f->ev[j], f->logic[j], f->cpu[j], f->present[j]);
+      shown++;
+    }
+}
+
 /* One frame shown while a (possibly long, mp3) song decodes. */
 static void draw_loading(SDL_Renderer *ren, const char *title) {
   SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
@@ -1151,6 +1386,13 @@ static int play_run(SDL_Renderer *ren, const Tja *tja, const char *tja_path, con
     return 0;
   }
   synth_se();
+  {
+    /* warm the per-song textures (title, badge) while the loading screen is up */
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    render(ren, &v, -LEAD_S, -LEAD_S, 0);
+    SDL_RenderPresent(ren);
+    v.draw_start = v.bar_start = 0;
+  }
   SDL_AudioStream *as = audio_start();
   if (!as) {
     audio_stop(NULL);
@@ -1166,8 +1408,10 @@ static int play_run(SDL_Renderer *ren, const Tja *tja, const char *tja_path, con
   int sel = 0, start = 0, result = 0, quit_app = 0;
   uint64_t result_at = 0;
   size_t auto_i = 0;
+  FrameTimes *ft = calloc(1, sizeof *ft);
   atomic_store(&offset_req_ms, 0);
   while (!quit_flag) {
+    uint64_t frame_t0 = mono_ns();
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
       if (e.type == SDL_EVENT_QUIT) quit_flag = 1;
@@ -1186,6 +1430,7 @@ static int play_run(SDL_Renderer *ren, const Tja *tja, const char *tja_path, con
       }
     }
     if (sel && start) break;
+    uint64_t t_ev = mono_ns();
 
     int req = atomic_exchange(&offset_req_ms, 0);
     if (req) {
@@ -1214,10 +1459,28 @@ static int play_run(SDL_Renderer *ren, const Tja *tja, const char *tja_path, con
       fprintf(stderr, "taiko: result score=%ld good=%d ok=%d bad=%d miss=%d maxcombo=%d\n", g.score, g.good, g.ok,
               g.bad, g.miss, g.max_combo);
     }
+    uint64_t t_r0 = mono_ns();
     render(ren, &v, T, Ta + g_vis_off, result);
+    uint64_t t_r1 = mono_ns();
     present(ren);
+    uint64_t t_r2 = mono_ns();
+    if (ft && ft->n < FT_MAX && !result) {
+      if (ft->last_start) ft->interval[ft->n] = (float)(frame_t0 - ft->last_start) / 1e6f;
+      else ft->interval[ft->n] = 16.7f;
+      ft->cpu[ft->n] = (float)(t_r1 - t_r0) / 1e6f;
+      ft->present[ft->n] = (float)(t_r2 - t_r1) / 1e6f;
+      ft->song_t[ft->n] = (float)T;
+      ft->ev[ft->n] = (float)(t_ev - frame_t0) / 1e6f;
+      ft->logic[ft->n] = (float)(t_r0 - t_ev) / 1e6f;
+      ft->n++;
+    }
+    if (ft) ft->last_start = frame_t0;
   }
   quit_app = quit_flag != 0;
+  if (ft) {
+    ft_report(ft, c->name);
+    free(ft);
+  }
   audio_stop(as);
   save_offset();
   game_free(&g);
@@ -1572,6 +1835,32 @@ static Choice menu_run(SDL_Renderer *ren, int *sel_io, int *cidx) {
   return ch;
 }
 
+/* Build every static texture and the digit glyphs before the first frame, so
+ * nothing is rasterised or uploaded in the middle of a song. */
+static void warm_up(SDL_Renderer *r) {
+  scene_init(r);
+  sprites_init(r);
+  for (char d = '0'; d <= '9'; d++) {
+    char one[2] = {d, 0};
+    utext_cached(r, 0, 0, one, 3, TM_OUTLINE, 255, 255, 255, 214, 120, 10, 0);   /* score */
+    utext_cached(r, 0, 0, one, 5, TM_OUTLINE, 255, 236, 100, 150, 40, 0, 0);    /* combo */
+    utext_cached(r, 0, 0, one, 3, TM_OUTLINE, 255, 110, 10, 255, 255, 255, 0);  /* balloon count */
+    utext_cached(r, 0, 0, one, 3, TM_OUTLINE, 80, 150, 255, 255, 255, 255, 0);  /* roll count */
+  }
+  for (int c = 33; c < 127; c++) { /* status line */
+    char one[2] = {(char)c, 0};
+    utext_cached(r, 0, 0, one, 1, TM_PLAIN, 214, 220, 240, 0, 0, 0, 0);
+  }
+  static const char *J[] = {"\xE8\x89\xAF", "\xE5\x8F\xAF", "\xE4\xB8\x8D\xE5\x8F\xAF"};
+  static const int F[3][3] = {{255, 230, 80}, {255, 255, 255}, {120, 170, 255}};
+  static const int O[3][3] = {{168, 70, 0}, {80, 80, 100}, {16, 28, 100}};
+  for (int k = 0; k < 3; k++)
+    utext_cached(r, 0, 0, J[k], 3, TM_OUTLINE, (Uint8)F[k][0], (Uint8)F[k][1], (Uint8)F[k][2], (Uint8)O[k][0],
+                 (Uint8)O[k][1], (Uint8)O[k][2], 0);
+  /* MISS shows the same "bad" kanji in grey */
+  utext_cached(r, 0, 0, J[2], 3, TM_OUTLINE, 170, 170, 190, 50, 50, 70, 0);
+}
+
 /* ---- main -------------------------------------------------------------- */
 int main(int argc, char **argv) {
   const char *tja_path = NULL, *dump = NULL, *songs_dir = "songs", *screen = NULL;
@@ -1655,6 +1944,7 @@ int main(int argc, char **argv) {
 
   SDL_SetRenderVSync(ren, 1);
   SDL_HideCursor();
+  warm_up(ren);
   pthread_t th;
   int th_ok = pthread_create(&th, NULL, input_thread, NULL) == 0;
 

@@ -471,6 +471,33 @@ stereo.
   procedurally at start-up. Reference downloads live in `.storage/reference/`
   (git-ignored) and must not be committed.
 
+## Taiko rendering performance (Mali-G31, SDL3 GLES2 renderer)
+
+Measured 2026-10-15 on the device with `--autoplay` on a dense Oni chart and an
+Easy chart; the app logs `frames[...]` (interval/draw/present percentiles, late
+frames, slow frames with their stages) to `/tmp/logs/taiko.log` per session.
+
+- Cost is the number of draw calls, not pixels or CPU logic: the first UI
+  (per-glyph text textures, nine stamps per glyph for an outline, scanline
+  circles, a 60-band gradient) issued ~1,500 small draws a frame, with texture
+  switches; 12-17% of frames missed vsync (33 ms), CPU 65-71% of a core, while
+  the draw code itself took only 2.3 ms.
+- Fix: rasterise each text once into a cached texture (outline and shadow baked
+  in), bake the static scene (gradient, hills, drum, target ring, GOGO glow)
+  into textures at start-up, generate the note sprites procedurally once.
+  Result: late frames < 0.2%, p99 16.7 ms, CPU ~20%.
+- Never create or destroy a texture while playing: `SDL_CreateTextureFromSurface`
+  / `SDL_DestroyTexture` mid-song stalled `SDL_RenderPresent` for 100-130 ms,
+  roughly every 0.2 s while the per-hit status line was rebuilt as a string.
+  Numbers and the status line are drawn from prewarmed per-digit/per-character
+  textures; the judgement kanji and the song's own text are warmed before the
+  audio starts.
+- Not the cause: DDR frequency scaling (`/sys/class/devfreq/dmc`, 0 transitions
+  during runs; `performance` governor gave the same numbers) or the CPU governor.
+- Occasional single 100 ms stalls right after `systemctl stop emustation`
+  (within ~5 s) did not reproduce when waiting 8 s first; when launched from the
+  menu the song starts well after ES has stopped.
+
 ## PocketJS (evaluated, not pursued)
 
 Cost (2026-10-13, `hero` demo, 960x544 raster, headless): boot ~250 ms, 19.6 MB

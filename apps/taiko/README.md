@@ -49,6 +49,13 @@ In game: A/B/D-pad don, X/Y/L1/R1 ka, L2/R2 judgement offset -/+5 ms,
 SELECT+START back. Calibration: tap in time with the clicks (judgement
 offset), L2/R2 aligns the flash with the click (visual offset); START applies.
 
+## Performance rules
+
+- Keep draw calls low: static layers and text are textures made once (text via
+  `utext_cached`, scene via `scene_init`); do not create/destroy textures while
+  a song plays (see `docs/gotchas.md`, Taiko rendering performance).
+- Each session logs frame statistics to `/tmp/logs/taiko.log`.
+
 ## Timing model
 
 - The audio clock is the master; hits carry the kernel event timestamp, so
