@@ -224,8 +224,8 @@ static int code_to_kind(int code) {
   switch (code) {
     case 304: return input_kind(IN_A);
     case 305: return input_kind(IN_B);
-    case 306: return input_kind(IN_X);
-    case 307: return input_kind(IN_Y);
+    case 306: return input_kind(IN_Y); /* the Nintendo-style layout: the LEFT face button is printed "Y" */
+    case 307: return input_kind(IN_X); /* and the TOP one "X"; SDL's x:b2 / y:b3 name them by position */
     case 308: return input_kind(IN_L1);
     case 309: return input_kind(IN_R1);
     case 544: return input_kind(IN_UP); /* BTN_DPAD_UP..RIGHT, if a pad reports them */
@@ -1316,8 +1316,8 @@ static int sdl_hit_kind(int b) {
   switch (b) {
     case SDL_GAMEPAD_BUTTON_SOUTH: return input_kind(IN_A);
     case SDL_GAMEPAD_BUTTON_EAST: return input_kind(IN_B);
-    case SDL_GAMEPAD_BUTTON_WEST: return input_kind(IN_X);
-    case SDL_GAMEPAD_BUTTON_NORTH: return input_kind(IN_Y);
+    case SDL_GAMEPAD_BUTTON_WEST: return input_kind(IN_Y); /* printed labels, see code_to_kind */
+    case SDL_GAMEPAD_BUTTON_NORTH: return input_kind(IN_X);
     case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: return input_kind(IN_L1);
     case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return input_kind(IN_R1);
     case SDL_GAMEPAD_BUTTON_DPAD_UP: return input_kind(IN_UP);

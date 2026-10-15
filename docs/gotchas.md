@@ -166,6 +166,13 @@ matching heading (or a new one), with the date when it is a measurement.
   to b6/b7. Thus X is 306, Y is 307, L1/R1 are 308/309 and Start/Select are
   310/311. The initial standard-code assumptions were wrong for the latter
   buttons; both UI and playback controls now use the measured order.
+- Printed face-button labels vs codes (2026-10-15, confirmed by the owner): the
+  RG351V is Nintendo-style (A right, B bottom, X top, Y left). SDL's DB entry
+  `x:b2,y:b3` names buttons by position, so code 306 (SDL "x", the LEFT button)
+  is printed **Y** and code 307 (SDL "y", the TOP button) is printed **X**.
+  A (304) and B (305) were not distinguished. Anything keyed on printed labels
+  must use 306 = Y, 307 = X; apps that use SDL names (deck: X shuffle, Y
+  repeat) get the opposite physical buttons.
 - Resolve latency can look like an unresponsive A button. The browser now
   shows elapsed loading time and allows cancellation. A matching cached
   manifest is reusable for ten minutes only while every URL's `expire`
