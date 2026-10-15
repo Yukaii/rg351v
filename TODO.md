@@ -38,6 +38,16 @@ Open work and what is already done. Facts learned along the way go in
 - [x] Build and verify a gamepad review UI with a limited card renderer
 - [ ] Verify reviewer suspend/resume on hardware
 
+### Taiko (TJA player)
+
+- [x] Phase 0: audio/input latency probe; ALSA 512/1536 chosen (see
+  `docs/gotchas.md`, Taiko / game audio latency)
+- [x] Phase 1: `.tja` parser and timeline compiler (`apps/taiko/src/tja.c`),
+  `tools/tja_dump.c`, `tools/check_timeline.py`; branches keep `#N` only
+- [ ] Phase 2: playable single song (audio clock master, event timestamps)
+- [ ] Phase 3: song select, scoring, results, calibration; sync script
+  (convert Shift-JIS to UTF-8 on the Mac)
+
 ## Done
 
 - [x] Flashed `AmberELEC-RG351V.aarch64-20230203.img` to SD1 (replaced 351ELEC)

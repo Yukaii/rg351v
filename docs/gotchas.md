@@ -382,6 +382,59 @@ matching heading (or a new one), with the date when it is a measurement.
   controls appear as boxes. The UI and terminal CLI also share a profile lock;
   close the reviewer before running terminal sync against the same collection.
 
+## Taiko / game audio latency (taiko-probe)
+
+Measured 2026-10-15 with `apps/taiko` (`scripts/build-port.sh taiko-probe`,
+Homebrew > Taiko Probe), SDL3 audio over ALSA dmix, 48 kHz S16 stereo.
+
+- The system dmix (`/storage/.config/asound.conf`) is pinned to period 1024 /
+  buffer 4096 @ 44.1 kHz. SDL's sample-frames hint cannot change it, so SDL
+  always reports 1114 frames (23 ms). A port needs its own PCM.
+- `ALSA_CONFIG_PATH` replaces `alsa.conf`, which also defines `hw:N`: the file
+  must start with `</usr/share/alsa/alsa.conf>`. That file loads
+  `/storage/.config/asound.conf` via `@hooks` after ours, so redefining
+  `pcm.!default` loses; give the PCM its own name and point SDL at it with
+  `SDL_AUDIO_ALSA_DEFAULT_PLAYBACK_DEVICE=<name>`. Use a distinct `ipc_key` per
+  dmix so it never inherits the shared one's parameters. ES holds
+  `/dev/snd/pcmC0D0p` in the menu (hw busy over SSH); it is free while a port
+  runs, so test audio configs inside the app, not with `aplay` over SSH.
+- Output latency is `2 x period` (SDL pre-fills exactly two periods whatever
+  the dmix buffer is). Callback timing, ~70 s each:
+
+  | period/buffer | late callbacks (>1.5x) | xruns | output latency |
+  |---|---|---|---|
+  | 256/1024, 256/1536, 256/2048 | 78, 64, 43 | yes (12 in the log) | 10.7 ms |
+  | 512/1536, 512/2048 | 0, 0 | 0 | 21.3 ms |
+  | 1024/4096 | 0 | 0 | 42.7 ms |
+
+  Period 256 is not stable here regardless of buffer (the audio thread wakes
+  one period late, interval = exactly 2 periods); period 512 is. Use 512/1536.
+- Probe press->write was ~18 ms in every config: the main loop polls the
+  gamepad once per vsync. Judge with the event timestamp (kernel time) and
+  trigger hit sounds from a dedicated input thread.
+- `/proc/asound/card0/pcm0p/sub0/status` is useless for dmix (appl_ptr stays 0,
+  delay negative); measure queue depth from SDL callback bursts instead.
+
+## TJA charts (apps/taiko)
+
+- Sample charts: `ExpedicHabbet/FormerSampleSongsForOpenTaiko` on GitHub
+  (Unlicense repo; songs from TaikoJiro/TJAPlayer3/Koioto samples), cloned to
+  `.storage/taiko-songs/` (git-ignored, ~87 MB, 12 `.tja`). Personal testing
+  only; the audio is third-party, never commit it. All files are UTF-8 with a
+  BOM and `.ogg` audio; real-world charts are often Shift-JIS (`Tja.bad_utf8`).
+- Timing (verified 2026-10-15 against ogg lengths: every single-song chart ends
+  2.5-7.5 s before its audio): first measure starts at `-OFFSET` seconds; a
+  measure lasts `4 * num/den` beats; its N note characters (every digit,
+  including `0`) are equally spaced; `#BPMCHANGE` acts from the next character,
+  `#DELAY` adds seconds at its position, `#MEASURE` applies to the measure it
+  precedes. A single `COURSE:` can be followed by `STYLE:Double` and
+  `#START P1`/`#START P2`; only the Single chart is used.
+- `BALLOON:` lists are consumed in order by 7 (and 9) notes; `8` ends the open
+  roll/balloon. Branches (`#BRANCHSTART`..`#BRANCHEND`, `#N/#E/#M`) all have
+  the same length; v1 keeps `#N` only. Medley and dan charts use `#NEXTSONG`
+  to switch audio files and are not supported.
+- Validate with `python3 apps/taiko/tools/check_timeline.py`.
+
 ## PocketJS (evaluated, not pursued)
 
 Cost (2026-10-13, `hero` demo, 960x544 raster, headless): boot ~250 ms, 19.6 MB
