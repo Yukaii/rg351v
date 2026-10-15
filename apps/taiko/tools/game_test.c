@@ -75,6 +75,7 @@ int main(int argc, char **argv) {
   EXPECT(g.miss == 0 && g.bad == 0 && g.ok == 0, "no ok/bad/miss expected");
   EXPECT((size_t)g.max_combo == hit_notes, "full combo expected");
   EXPECT(g.balloons_popped == g.balloons_total, "all balloons should pop");
+  EXPECT(g.gauge > 99.9 && game_cleared(&g), "perfect play fills the gauge and clears (%.1f)", g.gauge);
   long perfect_score = g.score;
   game_free(&g);
 
@@ -111,6 +112,7 @@ int main(int argc, char **argv) {
   printf("  miss=%d\n", g.miss);
   EXPECT((size_t)g.miss == hit_notes, "all notes should miss without input");
   EXPECT(game_finished(&g, g.last_t + 2.0), "should be finished");
+  EXPECT(g.gauge == 0 && !game_cleared(&g), "no input: empty gauge, not cleared (%.1f)", g.gauge);
   game_free(&g);
 
   tja_free(&t);

@@ -24,7 +24,11 @@ int game_init(Game *g, const TjaCourse *c) {
     double e = nt->end_t > nt->t ? nt->end_t : nt->t;
     if (e > g->last_t) g->last_t = e;
     if (is_balloon(nt->type)) g->balloons_total++;
+    if (is_hit(nt->type)) g->hit_notes++;
   }
+  /* clear lines as in the arcade: Easy 60, Normal/Hard 70, Oni/Ura 80 */
+  static const double CLEAR[5] = {60, 70, 70, 80, 80};
+  g->gauge_clear = CLEAR[c->id >= 0 && c->id <= 4 ? c->id : 3];
   return 0;
 }
 
@@ -44,6 +48,14 @@ static void add_score(Game *g, const TjaNote *n, int judge) {
   if (n->type == TJA_BIGDON || n->type == TJA_BIGKA) v *= 2;
   if (n->gogo) v = v * 12 / 10;
   g->score += v / 10 * 10;
+}
+
+/* good = +1 unit, ok = +0.5, bad/miss = -2 (a unit is 100 / hit notes) */
+static void gauge_add(Game *g, double units) {
+  if (g->hit_notes <= 0) return;
+  g->gauge += units * 100.0 / g->hit_notes;
+  if (g->gauge < 0) g->gauge = 0;
+  if (g->gauge > 100) g->gauge = 100;
 }
 
 static void advance(Game *g) {
@@ -100,10 +112,12 @@ void game_hit(Game *g, int kind, double t) {
     add_score(g, n, j);
     if (j == J_GOOD) g->good++;
     else g->ok++;
+    gauge_add(g, j == J_GOOD ? 1.0 : 0.5);
     g->fb_judge = j;
   } else {
     g->bad++;
     g->combo = 0;
+    gauge_add(g, -2.0);
     g->fb_judge = J_BAD;
   }
   advance(g);
@@ -120,6 +134,7 @@ void game_update(Game *g, double now) {
         g->done[i] = 2;
         g->miss++;
         g->combo = 0;
+        gauge_add(g, -2.0);
         g->fb_judge = J_MISS;
         g->fb_t = now;
       }
@@ -131,3 +146,5 @@ void game_update(Game *g, double now) {
 }
 
 int game_finished(const Game *g, double now) { return now > g->last_t + 1.0; }
+
+int game_cleared(const Game *g) { return g->gauge + 1e-9 >= g->gauge_clear; }

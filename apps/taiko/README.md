@@ -13,6 +13,9 @@ never committed.
 - `src/taiko.c`: the app: menu, calibration, play. Audio callback is the clock;
   an evdev thread timestamps hits; SDL draws.
 - `src/stb_vorbis.c`: ogg decoder (public domain).
+- Text uses GNU Unifont from `unifont.bin` (shared with deck/ptterm, shipped by
+  the port via `EXTRA_FILES`); without it the app falls back to ASCII only.
+  All artwork is drawn from primitives, no game assets.
 - `tools/tja_dump.c`, `tools/check_timeline.py`, `tools/game_test.c`: host
   tools and tests.
 

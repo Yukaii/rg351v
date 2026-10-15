@@ -24,6 +24,9 @@ typedef struct {
   double win_good, win_ok, win_bad; /* seconds, +/- around the note */
   double last_t;                    /* end of the last note */
   long score;
+  double gauge;       /* soul gauge 0..100; all-good play ends at 100 */
+  double gauge_clear; /* clear threshold in percent (per course) */
+  int hit_notes;      /* number of don/ka notes (gauge unit) */
   int good, ok, bad, miss, combo, max_combo;
   int roll_total, balloons_popped, balloons_total;
   /* last feedback, for the UI (song seconds) */
@@ -38,5 +41,6 @@ void game_free(Game *g);
 void game_hit(Game *g, int kind, double t);
 void game_update(Game *g, double now);
 int game_finished(const Game *g, double now);
+int game_cleared(const Game *g); /* gauge reached the clear threshold */
 
 #endif

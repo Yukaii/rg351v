@@ -47,8 +47,8 @@ extern int stb_vorbis_decode_filename(const char *filename, int *channels, int *
 #define SCR_W 640
 #define SCR_H 480
 #define LEAD_S 2.0 /* silence before the audio so early notes can scroll in */
-#define JX 110     /* judgement circle x */
-#define LANE_Y 120
+#define JX 140     /* judgement circle x */
+#define LANE_Y 104
 #define LANE_H 100
 #define BEAT_PX 130.0
 
@@ -290,7 +290,7 @@ static void *input_thread(void *arg) {
   return NULL;
 }
 
-/* ---- drawing ----------------------------------------------------------- */
+/* ---- primitives -------------------------------------------------------- */
 static void fill_circle(SDL_Renderer *r, float cx, float cy, int rad) {
   for (int dy = -rad; dy <= rad; dy++) {
     float w = sqrtf((float)(rad * rad - dy * dy));
@@ -309,60 +309,267 @@ static void text_c(SDL_Renderer *r, float cx, float y, float s, const char *str)
   text(r, cx - (float)strlen(str) * 4.0f * s, y, s, str);
 }
 
+
+/* ---- drawing ----------------------------------------------------------- */
+/* Everything is drawn from primitives (no copied game art). Text uses GNU
+ * Unifont (shared unifont.bin) so Japanese/Chinese titles and the judgement
+ * kanji render; without the file it falls back to SDL's ASCII debug font. */
+static uint32_t *uf_index; /* 65536 entries, see apps/ptterm/tools/gen-assets.py */
+static const uint8_t *uf_blob;
+static SDL_Texture *gcache[65536];
+
+static int load_font(const char *dir) {
+  char path[1100];
+  snprintf(path, sizeof path, "%sunifont.bin", dir);
+  FILE *f = fopen(path, "rb");
+  if (!f) return -1;
+  fseek(f, 0, SEEK_END);
+  long n = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  uint8_t *u = malloc((size_t)n);
+  if (!u || fread(u, 1, (size_t)n, f) != (size_t)n || n < 8 + 65536 * 4 || memcmp(u, "UF16", 4) != 0) {
+    fclose(f);
+    free(u);
+    return -1;
+  }
+  fclose(f);
+  uf_index = (uint32_t *)(u + 8);
+  uf_blob = u + 8 + 65536 * 4;
+  return 0;
+}
+
+static int u8_next(const char *s, uint32_t *cp) {
+  const uint8_t *p = (const uint8_t *)s;
+  if (p[0] < 0x80) { *cp = p[0]; return 1; }
+  if ((p[0] & 0xE0) == 0xC0 && (p[1] & 0xC0) == 0x80) {
+    *cp = (uint32_t)(p[0] & 0x1F) << 6 | (p[1] & 0x3F);
+    return 2;
+  }
+  if ((p[0] & 0xF0) == 0xE0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) {
+    *cp = (uint32_t)(p[0] & 0x0F) << 12 | (uint32_t)(p[1] & 0x3F) << 6 | (p[2] & 0x3F);
+    return 3;
+  }
+  if ((p[0] & 0xF8) == 0xF0 && (p[1] & 0xC0) == 0x80) { /* astral: no glyph */
+    *cp = 0xFFFD;
+    return p[2] && p[3] ? 4 : 1;
+  }
+  *cp = '?';
+  return 1;
+}
+
+static SDL_Texture *glyph_tex(SDL_Renderer *r, uint32_t cp, int *wide) {
+  *wide = 0;
+  if (cp >= 0x10000 || !uf_index) return NULL;
+  uint32_t ent = uf_index[cp];
+  if (!ent) return NULL;
+  *wide = (ent & 0x80000000u) != 0;
+  if (gcache[cp]) return gcache[cp];
+  const uint8_t *g = uf_blob + ((ent & 0x7FFFFFFF) - 1);
+  int w = *wide ? 16 : 8;
+  uint32_t px[16 * 16];
+  memset(px, 0, sizeof px);
+  for (int row = 0; row < 16; row++) {
+    uint32_t bits = *wide ? (uint32_t)(g[row * 2] << 8 | g[row * 2 + 1]) : g[row];
+    for (int x = 0; x < w; x++)
+      if ((bits >> (w - 1 - x)) & 1) px[row * w + x] = 0xFFFFFFFFu;
+  }
+  SDL_Surface *sf = SDL_CreateSurfaceFrom(w, 16, SDL_PIXELFORMAT_RGBA32, px, w * 4);
+  SDL_Texture *t = sf ? SDL_CreateTextureFromSurface(r, sf) : NULL;
+  if (sf) SDL_DestroySurface(sf);
+  if (t) {
+    SDL_SetTextureScaleMode(t, SDL_SCALEMODE_NEAREST);
+    SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+  }
+  gcache[cp] = t;
+  return t;
+}
+
+static int utext_w(SDL_Renderer *r, const char *s, int scale) {
+  int w = 0;
+  while (*s) {
+    uint32_t cp;
+    s += u8_next(s, &cp);
+    int wide;
+    glyph_tex(r, cp, &wide);
+    w += (wide ? 16 : 8) * scale;
+  }
+  return w;
+}
+
+static void ascii(const char *in, char *out, size_t cap) {
+  size_t j = 0;
+  for (size_t i = 0; in[i] && j + 1 < cap; i++) out[j++] = ((unsigned char)in[i] < 0x80) ? in[i] : '?';
+  out[j] = 0;
+}
+
+static void utext(SDL_Renderer *r, int x, int y, const char *s, int scale, Uint8 R, Uint8 G, Uint8 B, Uint8 A) {
+  if (!uf_index) {
+    char a[200];
+    ascii(s, a, sizeof a);
+    SDL_SetRenderDrawColor(r, R, G, B, A);
+    text(r, (float)x, (float)y, (float)scale, a);
+    return;
+  }
+  while (*s) {
+    uint32_t cp;
+    s += u8_next(s, &cp);
+    int wide;
+    SDL_Texture *t = glyph_tex(r, cp, &wide);
+    int adv = (wide ? 16 : 8) * scale;
+    if (t) {
+      SDL_SetTextureColorMod(t, R, G, B);
+      SDL_SetTextureAlphaMod(t, A);
+      SDL_FRect d = {(float)x, (float)y, (float)adv, (float)(16 * scale)};
+      SDL_RenderTexture(r, t, NULL, &d);
+    }
+    x += adv;
+  }
+}
+
+/* shadowed, slightly emboldened text */
+static void utext_s(SDL_Renderer *r, int x, int y, const char *s, int scale, Uint8 R, Uint8 G, Uint8 B, Uint8 A) {
+  utext(r, x + scale, y + scale, s, scale, 0, 0, 0, (Uint8)(A * 3 / 4));
+  utext(r, x + 1, y, s, scale, R, G, B, A);
+  utext(r, x, y, s, scale, R, G, B, A);
+}
+
+/* fit into maxw pixels: cut and end with "..." when too long */
+static void utext_fit(SDL_Renderer *r, int x, int y, int maxw, const char *s, int scale, Uint8 R, Uint8 G, Uint8 B) {
+  if (utext_w(r, s, scale) <= maxw) {
+    utext_s(r, x, y, s, scale, R, G, B, 255);
+    return;
+  }
+  char buf[256];
+  size_t n = 0;
+  int w = 0, dots = utext_w(r, "...", scale);
+  while (*s && n + 8 < sizeof buf) {
+    uint32_t cp;
+    int len = u8_next(s, &cp), wide;
+    glyph_tex(r, cp, &wide);
+    int adv = (wide ? 16 : 8) * scale;
+    if (w + adv + dots > maxw) break;
+    memcpy(buf + n, s, (size_t)len);
+    n += (size_t)len;
+    w += adv;
+    s += len;
+  }
+  buf[n] = 0;
+  strcat(buf, "...");
+  utext_s(r, x, y, buf, scale, R, G, B, 255);
+}
+
+static void col(SDL_Renderer *r, int R, int G, int B, int A) { SDL_SetRenderDrawColor(r, (Uint8)R, (Uint8)G, (Uint8)B, (Uint8)A); }
+
+static void rect(SDL_Renderer *r, float x, float y, float w, float h) {
+  SDL_FRect f = {x, y, w, h};
+  SDL_RenderFillRect(r, &f);
+}
+
+static void ring(SDL_Renderer *r, float cx, float cy, int rad, int thick) {
+  int rin = rad - thick;
+  for (int dy = -rad; dy <= rad; dy++) {
+    float wo = sqrtf((float)(rad * rad - dy * dy));
+    if (abs(dy) < rin) {
+      float wi = sqrtf((float)(rin * rin - dy * dy));
+      rect(r, cx - wo, cy + (float)dy, wo - wi, 1);
+      rect(r, cx + wi, cy + (float)dy, wo - wi, 1);
+    } else {
+      rect(r, cx - wo, cy + (float)dy, 2 * wo, 1);
+    }
+  }
+}
+
+static void gradient(SDL_Renderer *r, int y0, int y1, int R0, int G0, int B0, int R1, int G1, int B1) {
+  const int band = 8;
+  for (int y = y0; y < y1; y += band) {
+    float k = (float)(y - y0) / (float)(y1 - y0 > 1 ? y1 - y0 : 1);
+    col(r, (int)(R0 + (R1 - R0) * k), (int)(G0 + (G1 - G0) * k), (int)(B0 + (B1 - B0) * k), 255);
+    rect(r, 0, (float)y, SCR_W, (float)(y + band > y1 ? y1 - y : band));
+  }
+}
+
+/* course colours as in the arcade: Easy red-orange, Normal green, Hard
+ * amber, Oni magenta, Ura purple */
+static void course_rgb(int id, int *R, int *G, int *B) {
+  static const int C[5][3] = {{232, 84, 56}, {104, 190, 60}, {236, 160, 28}, {214, 40, 140}, {142, 64, 204}};
+  if (id < 0 || id > 4) id = 3;
+  *R = C[id][0];
+  *G = C[id][1];
+  *B = C[id][2];
+}
+
+static const char *course_name(int id) {
+  static const char *N[] = {"Easy", "Normal", "Hard", "Oni", "Ura"};
+  return id >= 0 && id <= 4 ? N[id] : "?";
+}
+
+static void pill(SDL_Renderer *r, int x, int y, int w, int h, int R, int G, int B) {
+  col(r, 0, 0, 0, 200);
+  rect(r, (float)x - 2, (float)y - 2, (float)w + 4, (float)h + 4);
+  col(r, R, G, B, 255);
+  rect(r, (float)x, (float)y, (float)w, (float)h);
+  col(r, R + (255 - R) / 3, G + (255 - G) / 3, B + (255 - B) / 3, 255);
+  rect(r, (float)x, (float)y, (float)w, (float)h / 3);
+}
+
 static double px_per_s(double bpm, double scroll) { return bpm * scroll / 60.0 * BEAT_PX; }
 
-static void note_colors(int type, Uint8 *rr, Uint8 *gg, Uint8 *bb) {
-  if (type == TJA_DON || type == TJA_BIGDON) {
-    *rr = 235, *gg = 64, *bb = 40;
-  } else {
-    *rr = 60, *gg = 160, *bb = 230;
+/* A note disc in the arcade style: black edge, white ring, coloured body with a
+ * lighter centre and a small shine. */
+static void disc(SDL_Renderer *r, float x, float y, int rad, int R, int G, int B, int dim) {
+  if (dim) R /= 2, G /= 2, B /= 2;
+  col(r, 0, 0, 0, 255);
+  fill_circle(r, x, y, rad + 4);
+  col(r, dim ? 150 : 255, dim ? 150 : 255, dim ? 150 : 255, 255);
+  fill_circle(r, x, y, rad + 2);
+  col(r, R, G, B, 255);
+  fill_circle(r, x, y, rad);
+  col(r, R + (255 - R) / 2, G + (255 - G) / 2, B + (255 - B) / 2, 255);
+  fill_circle(r, x, y, rad - 7);
+  if (!dim) {
+    col(r, 255, 255, 255, 255);
+    fill_circle(r, x - (float)rad / 3, y - (float)rad / 3, 3);
   }
 }
 
 static void draw_note(SDL_Renderer *r, const TjaNote *n, double T, int missed) {
   double sp = px_per_s(n->bpm, n->scroll);
   double x = JX + (n->t - T) * sp;
-  Uint8 cr, cg, cb;
   float cy = LANE_Y + LANE_H / 2.0f;
   switch (n->type) {
     case TJA_DON:
-    case TJA_KA:
     case TJA_BIGDON:
+    case TJA_KA:
     case TJA_BIGKA: {
       if (x < -40 || x > SCR_W + 40) return;
       int big = n->type == TJA_BIGDON || n->type == TJA_BIGKA;
-      int rad = big ? 28 : 20;
-      note_colors(n->type, &cr, &cg, &cb);
-      SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
-      fill_circle(r, (float)x, cy, rad + 3);
-      if (missed) SDL_SetRenderDrawColor(r, (Uint8)(cr / 2), (Uint8)(cg / 2), (Uint8)(cb / 2), 255);
-      else SDL_SetRenderDrawColor(r, cr, cg, cb, 255);
-      fill_circle(r, (float)x, cy, rad);
+      int don = n->type == TJA_DON || n->type == TJA_BIGDON;
+      if (don) disc(r, (float)x, cy, big ? 30 : 21, 238, 56, 38, missed);
+      else disc(r, (float)x, cy, big ? 30 : 21, 44, 160, 232, missed);
       break;
     }
     case TJA_ROLL:
     case TJA_BIGROLL: {
       double x2 = JX + (n->end_t - T) * sp;
       if (x2 < -40 || x > SCR_W + 40) return;
-      int h = n->type == TJA_BIGROLL ? 28 : 20;
+      int h = n->type == TJA_BIGROLL ? 30 : 21;
       double xa = x < JX && x2 > JX ? JX : x;
-      SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
-      SDL_FRect o = {(float)xa, cy - h - 3, (float)(x2 - xa), (float)(2 * h + 6)};
-      SDL_RenderFillRect(r, &o);
-      SDL_SetRenderDrawColor(r, 250, 200, 40, 255);
-      SDL_FRect f = {(float)xa, cy - h, (float)(x2 - xa), (float)(2 * h)};
-      SDL_RenderFillRect(r, &f);
-      fill_circle(r, (float)x2, cy, h);
-      if (x >= JX) fill_circle(r, (float)x, cy, h);
+      col(r, 0, 0, 0, 255);
+      rect(r, (float)xa, cy - h - 4, (float)(x2 - xa), (float)(2 * h + 8));
+      col(r, 255, 255, 255, 255);
+      rect(r, (float)xa, cy - h - 2, (float)(x2 - xa), (float)(2 * h + 4));
+      col(r, 250, 196, 36, 255);
+      rect(r, (float)xa, cy - h, (float)(x2 - xa), (float)(2 * h));
+      col(r, 255, 232, 130, 255);
+      rect(r, (float)xa, cy - h + 5, (float)(x2 - xa), (float)(h - 4));
+      disc(r, (float)x2, cy, h, 250, 196, 36, 0);
+      if (x >= JX) disc(r, (float)x, cy, h, 250, 196, 36, 0);
       break;
     }
     default: { /* balloon, kusudama */
       double xd = x < JX ? JX : x;
       if (xd > SCR_W + 40 || n->end_t < T) return;
-      SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
-      fill_circle(r, (float)xd, cy, 28);
-      SDL_SetRenderDrawColor(r, 240, 120, 30, 255);
-      fill_circle(r, (float)xd, cy, 24);
+      disc(r, (float)xd, cy, 27, 246, 130, 30, 0);
       break;
     }
   }
@@ -376,140 +583,211 @@ typedef struct {
   int offset_ms;
 } View;
 
-static void ascii(const char *in, char *out, size_t cap) {
-  size_t j = 0;
-  for (size_t i = 0; in[i] && j + 1 < cap; i++) out[j++] = ((unsigned char)in[i] < 0x80) ? in[i] : '?';
-  out[j] = 0;
+/* soul gauge: 50 cells, the clear line marked, cells past it turn gold */
+static void soul_gauge(SDL_Renderer *r, int x, int y, int w, int h, const Game *g) {
+  col(r, 0, 0, 0, 255);
+  rect(r, (float)x - 3, (float)y - 3, (float)w + 6, (float)h + 6);
+  col(r, 40, 40, 52, 255);
+  rect(r, (float)x, (float)y, (float)w, (float)h);
+  int cells = 50, clear = (int)lround(g->gauge_clear / 2.0), fill = (int)floor(g->gauge / 2.0);
+  float cw = (float)w / (float)cells;
+  for (int i = 0; i < fill && i < cells; i++) {
+    if (i >= clear) col(r, 255, 214, 60, 255);
+    else col(r, 232, 84 + i * 2, 40, 255);
+    rect(r, (float)x + (float)i * cw + 1, (float)y + 2, cw - 1, (float)h - 4);
+  }
+  col(r, 255, 255, 255, 255);
+  rect(r, (float)x + (float)clear * cw - 1, (float)y - 5, 2, (float)h + 10);
 }
 
 static void render(SDL_Renderer *r, View *v, double Tj, double T, int result) {
   const TjaCourse *c = v->c;
   Game *g = v->g;
-  int gogo = 0;
-  for (size_t i = v->draw_start; i < c->n_notes && c->notes[i].t < T + 0.01; i++) gogo = c->notes[i].gogo;
-  SDL_SetRenderDrawColor(r, 22, 22, 30, 255);
-  SDL_RenderClear(r);
+  const Tja *tja = v->tja;
+  SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
 
-  SDL_SetRenderDrawColor(r, gogo ? 110 : 52, gogo ? 60 : 52, gogo ? 40 : 62, 255);
-  SDL_FRect lane = {0, LANE_Y, SCR_W, LANE_H};
-  SDL_RenderFillRect(r, &lane);
-  SDL_SetRenderDrawColor(r, 30, 30, 36, 255);
-  SDL_FRect cap = {0, LANE_Y, JX + 40, LANE_H};
-  SDL_RenderFillRect(r, &cap);
-
-  /* bar lines */
-  while (v->bar_start < c->n_bars && c->bars[v->bar_start].t < T - 0.5) v->bar_start++;
-  SDL_SetRenderDrawColor(r, 150, 150, 160, 255);
-  for (size_t i = v->bar_start; i < c->n_bars && c->bars[i].t < T + 8.0; i++) {
-    const TjaBar *b = &c->bars[i];
-    if (!b->visible) continue;
-    double x = JX + (b->t - T) * px_per_s(b->bpm, b->scroll);
-    if (x < JX - 30 || x > SCR_W) continue;
-    SDL_FRect f = {(float)x, LANE_Y, 2, LANE_H};
-    SDL_RenderFillRect(r, &f);
-  }
-
-  /* judgement target, flashes with the last hit */
-  float cy = LANE_Y + LANE_H / 2.0f;
-  int flash = Tj - g->hit_t < 0.10 && g->hit_t > 0;
-  SDL_SetRenderDrawColor(r, 200, 200, 210, 255);
-  fill_circle(r, JX, cy, 34);
-  if (flash) {
-    if (g->hit_kind == HIT_DON) SDL_SetRenderDrawColor(r, 235, 64, 40, 255);
-    else SDL_SetRenderDrawColor(r, 60, 160, 230, 255);
-  } else {
-    SDL_SetRenderDrawColor(r, 40, 40, 48, 255);
-  }
-  fill_circle(r, JX, cy, 30);
-
-  /* notes, far to near so near ones sit on top */
   while (v->draw_start < c->n_notes) {
     const TjaNote *n = &c->notes[v->draw_start];
     double e = n->end_t > n->t ? n->end_t : n->t;
     if (e < T - 0.4) v->draw_start++;
     else break;
   }
+  int gogo = 0;
+  double bpm = tja->bpm > 0 ? tja->bpm : 120;
+  for (size_t i = v->draw_start; i < c->n_notes && c->notes[i].t < T + 0.01; i++) gogo = c->notes[i].gogo;
+  if (v->draw_start < c->n_notes) bpm = c->notes[v->draw_start].bpm;
+  double beat = fmod(T * bpm / 60.0, 1.0);
+  if (beat < 0) beat += 1.0;
+  float pulse = beat < 0.35 ? (float)(1.0 - beat / 0.35) : 0.0f;
+
+  /* background */
+  gradient(r, 0, SCR_H, 16 + (gogo ? 30 : 0), 20, 48, 40 + (int)(pulse * 18) + (gogo ? 60 : 0), 16, 56);
+  /* faint rising stripes in the lower half give the beat something to move */
+  for (int i = 0; i < 10; i++) {
+    float sx = fmodf((float)i * 70.0f + (float)(T * 24.0), 700.0f) - 30.0f;
+    col(r, 255, 255, 255, 10 + (int)(pulse * 14));
+    rect(r, sx, LANE_Y + LANE_H + 8, 26, SCR_H - LANE_Y - LANE_H - 40);
+  }
+
+  /* header */
+  col(r, 0, 0, 0, 140);
+  rect(r, 0, 0, SCR_W, 74);
+  utext_fit(r, 12, 6, 300, tja->title[0] ? tja->title : "?", 2, 255, 255, 255);
+  int cr, cg, cb;
+  course_rgb(c->id, &cr, &cg, &cb);
+  char badge[48];
+  snprintf(badge, sizeof badge, "%s  \xE2\x98\x85%d", course_name(c->id), c->level);
+  int bw = utext_w(r, badge, 1) + 16;
+  pill(r, 12, 42, bw, 22, cr, cg, cb);
+  utext(r, 20, 45, badge, 1, 255, 255, 255, 255);
+
+  char sc[32];
+  snprintf(sc, sizeof sc, "%ld", g->score);
+  utext_s(r, SCR_W - 12 - utext_w(r, sc, 3), 0, sc, 3, 255, 236, 120, 255);
+  utext_s(r, 332, 54, "SOUL", 1, 255, 255, 255, 255);
+  soul_gauge(r, 376, 53, 252, 16, g);
+
+  /* lane */
+  float cy = LANE_Y + LANE_H / 2.0f;
+  col(r, 0, 0, 0, 170);
+  rect(r, 0, LANE_Y - 4, SCR_W, LANE_H + 8);
+  if (gogo) col(r, 150 + (int)(pulse * 40), 70, 60, 255);
+  else col(r, 56, 56, 66, 255);
+  rect(r, 0, LANE_Y, SCR_W, LANE_H);
+  col(r, 255, 255, 255, gogo ? 90 : 40);
+  rect(r, 0, LANE_Y, SCR_W, 3);
+  rect(r, 0, LANE_Y + LANE_H - 3, SCR_W, 3);
+  if (gogo) { /* flames along the lane while GOGO TIME */
+    for (int i = 0; i < 14; i++) {
+      float hgt = 8.0f + 10.0f * (0.5f + 0.5f * sinf((float)(T * 9.0 + i * 1.7)));
+      col(r, 255, 170 + (i % 3) * 25, 40, 160);
+      rect(r, 170.0f + (float)i * 33.0f, LANE_Y - hgt, 18, hgt);
+    }
+  }
+  col(r, 26, 26, 34, 255);
+  rect(r, 0, LANE_Y, JX + 44, LANE_H);
+
+  /* bar lines */
+  while (v->bar_start < c->n_bars && c->bars[v->bar_start].t < T - 0.5) v->bar_start++;
+  col(r, 214, 214, 224, 200);
+  for (size_t i = v->bar_start; i < c->n_bars && c->bars[i].t < T + 8.0; i++) {
+    const TjaBar *b = &c->bars[i];
+    if (!b->visible) continue;
+    double x = JX + (b->t - T) * px_per_s(b->bpm, b->scroll);
+    if (x < JX + 36 || x > SCR_W) continue;
+    rect(r, (float)x, LANE_Y + 3, 2, LANE_H - 6);
+  }
+
+  /* drum: rim (ka) and head (don) flash on a hit */
+  int since = (Tj - g->hit_t < 0.09 && g->hit_t > 0);
+  int hit_don = since && g->hit_kind == HIT_DON, hit_ka = since && g->hit_kind == HIT_KA;
+  col(r, 0, 0, 0, 255);
+  fill_circle(r, 62, cy, 46);
+  if (hit_ka) col(r, 120, 200, 255, 255);
+  else col(r, 40, 110, 205, 255);
+  fill_circle(r, 62, cy, 42);
+  col(r, 236, 230, 214, 255);
+  fill_circle(r, 62, cy, 31);
+  if (hit_don) col(r, 255, 110, 90, 255);
+  else col(r, 224, 52, 36, 255);
+  fill_circle(r, 62, cy, 21);
+
+  /* target: guide ring, bigger faint ring for big notes */
+  col(r, 255, 255, 255, 60);
+  ring(r, JX, cy, 36, 3);
+  col(r, 236, 236, 244, 255);
+  ring(r, JX, cy, 27, 4);
+  col(r, 0, 0, 0, 255);
+  ring(r, JX, cy, 31, 1);
+
+  /* notes, far to near so near ones sit on top */
   size_t last = v->draw_start;
   while (last < c->n_notes && c->notes[last].t < T + 8.0) last++;
   for (size_t i = last; i-- > v->draw_start;) {
     if (g->done[i] == 1) continue;
     draw_note(r, &c->notes[i], T, g->done[i] == 2);
   }
-  /* balloon counter */
-  for (size_t i = v->draw_start; i < last; i++) {
+  for (size_t i = v->draw_start; i < last; i++) { /* balloon counter */
     const TjaNote *n = &c->notes[i];
     if ((n->type == TJA_BALLOON || n->type == TJA_KUSUDAMA) && !g->done[i] && n->t <= T && T <= n->end_t) {
       char b[16];
       snprintf(b, sizeof b, "%d", n->hits - g->roll_hits[i]);
-      text_c(r, JX + 70, LANE_Y + 8, 3, b);
+      utext_s(r, JX + 40, (int)cy - 56, b, 4, 255, 236, 120, 255);
     }
   }
 
-  /* feedback text */
-  if (g->fb_judge && Tj - g->fb_t < 0.45) {
-    static const char *J[] = {"", "GOOD", "OK", "BAD", "MISS"};
-    static const Uint8 col[5][3] = {{0, 0, 0}, {255, 220, 80}, {255, 255, 255}, {80, 140, 255}, {160, 160, 170}};
-    SDL_SetRenderDrawColor(r, col[g->fb_judge][0], col[g->fb_judge][1], col[g->fb_judge][2], 255);
-    text_c(r, JX, LANE_Y - 28, 2, J[g->fb_judge]);
+  /* judgement: rising kanji + an expanding ring on good/ok */
+  double age = Tj - g->fb_t;
+  if (g->fb_judge && age >= 0 && age < 0.45) {
+    static const char *J[] = {"", "\xE8\x89\xAF", "\xE5\x8F\xAF", "\xE4\xB8\x8D\xE5\x8F\xAF", "\xE4\xB8\x8D\xE5\x8F\xAF"};
+    static const int RGB[5][3] = {{0, 0, 0}, {255, 214, 60}, {255, 255, 255}, {110, 150, 255}, {140, 140, 160}};
+    int a = (int)(255 * (1.0 - age / 0.45));
+    int yy = LANE_Y - 50 - (int)(age * 36);
+    int jw = utext_w(r, J[g->fb_judge], 3);
+    utext(r, JX - jw / 2 + 3, yy + 3, J[g->fb_judge], 3, 0, 0, 0, (Uint8)(a / 2));
+    utext(r, JX - jw / 2, yy, J[g->fb_judge], 3, (Uint8)RGB[g->fb_judge][0], (Uint8)RGB[g->fb_judge][1],
+          (Uint8)RGB[g->fb_judge][2], (Uint8)a);
+    if (g->fb_judge <= J_OK && age < 0.2) {
+      col(r, RGB[g->fb_judge][0], RGB[g->fb_judge][1], RGB[g->fb_judge][2], (int)(220 * (1.0 - age / 0.2)));
+      ring(r, JX, cy, 36 + (int)(age * 130), 4);
+    }
   }
 
-  /* HUD */
-  SDL_SetRenderDrawColor(r, 235, 235, 240, 255);
-  char t1[160], t2[96];
-  ascii(v->tja->title, t1, sizeof t1);
-  text(r, 8, 8, 2, t1);
-  snprintf(t2, sizeof t2, "%s  lv%d", c->name, c->level);
-  text(r, 8, 30, 1, t2);
-  snprintf(t2, sizeof t2, "SCORE %ld", g->score);
-  text(r, SCR_W - 8 - (float)strlen(t2) * 16, 8, 2, t2);
+  /* combo under the drum */
   if (g->combo >= 2) {
     char cb[24];
     snprintf(cb, sizeof cb, "%d", g->combo);
-    SDL_SetRenderDrawColor(r, 250, 220, 90, 255);
-    text_c(r, SCR_W / 2.0f, 250, 6, cb);
-    SDL_SetRenderDrawColor(r, 235, 235, 240, 255);
-    text_c(r, SCR_W / 2.0f, 304, 2, "COMBO");
+    int w = utext_w(r, cb, 5);
+    utext_s(r, 62 - w / 2, LANE_Y + LANE_H + 14, cb, 5, 255, 214, 60, 255);
+    utext_s(r, 62 - utext_w(r, "COMBO", 1) / 2, LANE_Y + LANE_H + 14 + 84, "COMBO", 1, 255, 255, 255, 255);
   }
-  /* progress + status line */
+
+  /* progress and trims */
   double prog = g->last_t > 0 ? Tj / g->last_t : 0;
   if (prog < 0) prog = 0;
   if (prog > 1) prog = 1;
-  SDL_SetRenderDrawColor(r, 70, 70, 84, 255);
-  SDL_FRect pb = {8, SCR_H - 22, SCR_W - 16, 6};
-  SDL_RenderFillRect(r, &pb);
-  SDL_SetRenderDrawColor(r, 250, 200, 40, 255);
-  SDL_FRect pf = {8, SCR_H - 22, (float)((SCR_W - 16) * prog), 6};
-  SDL_RenderFillRect(r, &pf);
-  SDL_SetRenderDrawColor(r, 150, 150, 165, 255);
-  snprintf(t2, sizeof t2, "judge %+d ms (L2/R2)   good %d ok %d bad %d miss %d", v->offset_ms, g->good, g->ok,
-           g->bad, g->miss);
-  text(r, 8, SCR_H - 12, 1, t2);
+  col(r, 0, 0, 0, 160);
+  rect(r, 0, SCR_H - 26, SCR_W, 26);
+  col(r, 70, 70, 84, 255);
+  rect(r, 8, SCR_H - 8, SCR_W - 16, 4);
+  col(r, 250, 200, 40, 255);
+  rect(r, 8, SCR_H - 8, (float)((SCR_W - 16) * prog), 4);
+  char st[120];
+  snprintf(st, sizeof st, "judge %+d ms (L2/R2)   %d good  %d ok  %d bad  %d miss", v->offset_ms, g->good, g->ok, g->bad,
+           g->miss);
+  utext(r, 8, SCR_H - 24, st, 1, 190, 190, 205, 255);
 
   if (result) {
-    SDL_SetRenderDrawColor(r, 0, 0, 0, 255);
-    SDL_FRect box = {70, 70, SCR_W - 140, SCR_H - 140};
-    SDL_RenderFillRect(r, &box);
-    SDL_SetRenderDrawColor(r, 250, 220, 90, 255);
-    text_c(r, SCR_W / 2.0f, 90, 3, "RESULT");
-    SDL_SetRenderDrawColor(r, 235, 235, 240, 255);
+    col(r, 0, 0, 0, 190);
+    rect(r, 0, 0, SCR_W, SCR_H);
+    col(r, 250, 200, 40, 255);
+    rect(r, 54, 54, SCR_W - 108, SCR_H - 108);
+    col(r, 20, 22, 40, 255);
+    rect(r, 58, 58, SCR_W - 116, SCR_H - 116);
+    pill(r, 74, 74, 120, 24, cr, cg, cb);
+    utext(r, 86, 78, badge, 1, 255, 255, 255, 255);
+    utext_fit(r, 74, 104, SCR_W - 150, tja->title, 2, 255, 255, 255);
+    int cleared = game_cleared(g);
+    utext_s(r, SCR_W - 74 - utext_w(r, cleared ? "CLEAR" : "FAILED", 4), 70, cleared ? "CLEAR" : "FAILED", 4,
+            cleared ? 255 : 150, cleared ? 214 : 160, cleared ? 60 : 190, 255);
     char l[64];
-    snprintf(l, sizeof l, "SCORE     %ld", g->score);
-    text(r, 120, 150, 2, l);
-    snprintf(l, sizeof l, "GOOD      %d", g->good);
-    text(r, 120, 180, 2, l);
-    snprintf(l, sizeof l, "OK        %d", g->ok);
-    text(r, 120, 205, 2, l);
-    snprintf(l, sizeof l, "BAD       %d", g->bad);
-    text(r, 120, 230, 2, l);
-    snprintf(l, sizeof l, "MISS      %d", g->miss);
-    text(r, 120, 255, 2, l);
-    snprintf(l, sizeof l, "MAX COMBO %d", g->max_combo);
-    text(r, 120, 290, 2, l);
-    snprintf(l, sizeof l, "ROLL HITS %d", g->roll_total);
-    text(r, 120, 315, 2, l);
-    snprintf(l, sizeof l, "BALLOONS  %d/%d", g->balloons_popped, g->balloons_total);
-    text(r, 120, 340, 2, l);
-    text_c(r, SCR_W / 2.0f, 395, 2, "press A to leave");
+    const char *lab[] = {"\xE8\x89\xAF  GOOD", "\xE5\x8F\xAF  OK", "\xE4\xB8\x8D\xE5\x8F\xAF  BAD", "MISS", "MAX COMBO", "ROLL",
+                         "BALLOON"};
+    int val[] = {g->good, g->ok, g->bad, g->miss, g->max_combo, g->roll_total, g->balloons_popped};
+    for (int i = 0; i < 7; i++) {
+      int yy = 146 + i * 34;
+      utext_s(r, 90, yy, lab[i], 2, 235, 235, 245, 255);
+      if (i == 6) snprintf(l, sizeof l, "%d / %d", val[i], g->balloons_total);
+      else snprintf(l, sizeof l, "%d", val[i]);
+      utext_s(r, 330 - utext_w(r, l, 2), yy, l, 2, 255, 236, 120, 255);
+    }
+    snprintf(l, sizeof l, "%ld", g->score);
+    utext_s(r, 360, 168, "SCORE", 1, 190, 190, 210, 255);
+    utext_s(r, SCR_W - 74 - utext_w(r, l, 4), 190, l, 4, 255, 236, 120, 255);
+    soul_gauge(r, 360, 270, SCR_W - 74 - 360, 22, g);
+    snprintf(l, sizeof l, "%d%%", (int)lround(g->gauge));
+    utext_s(r, SCR_W - 74 - utext_w(r, l, 2), 300, l, 2, 255, 255, 255, 255);
+    utext_s(r, SCR_W / 2 - utext_w(r, "PRESS A", 2) / 2, SCR_H - 92, "PRESS A", 2, 255, 255, 255, 255);
   }
 }
 
@@ -878,7 +1156,7 @@ static int calibrate_run(SDL_Renderer *ren) {
 /* ---- songs and menu ---------------------------------------------------- */
 typedef struct {
   char path[1024];
-  char label[96];
+  char label[256];
   Tja tja;
   int ids[8];
   int n_ids;
@@ -915,7 +1193,7 @@ static void add_song(const char *path, const char *fname) {
   snprintf(base, sizeof base, "%s", fname);
   char *dot = strrchr(base, '.');
   if (dot) *dot = 0;
-  ascii(base, s.label, sizeof s.label);
+  snprintf(s.label, sizeof s.label, "%s", s.tja.title[0] ? s.tja.title : base);
   songs = realloc(songs, (size_t)(n_songs + 1) * sizeof *songs);
   songs[n_songs++] = s;
 }
@@ -937,17 +1215,74 @@ static void scan_dir(const char *dir, int depth) {
   closedir(d);
 }
 
-static const char *course_name(int id) {
-  static const char *N[] = {"Easy", "Normal", "Hard", "Oni", "Ura"};
-  return id >= 0 && id <= 4 ? N[id] : "?";
-}
-
 typedef struct {
   int quit;
   int calibrate;
   int song;
   int course_id;
 } Choice;
+
+static void draw_menu(SDL_Renderer *ren, int sel, int top, int rows, int items, const int *cidx) {
+  SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+  double t = (double)mono_ns() / 1e9;
+  gradient(ren, 0, SCR_H, 18, 22, 50, 42, 16, 58);
+  for (int i = 0; i < 12; i++) { /* slow drifting stripes */
+    float sx = fmodf((float)i * 64.0f + (float)(t * 14.0), 700.0f) - 30.0f;
+    col(ren, 255, 255, 255, 10);
+    rect(ren, sx, 70, 24, SCR_H - 100);
+  }
+  col(ren, 0, 0, 0, 150);
+  rect(ren, 0, 0, SCR_W, 62);
+  utext_s(ren, 16, 12, "TAIKO", 4, 255, 214, 60, 255);
+  char l[96];
+  snprintf(l, sizeof l, "judge %+d ms   visual %+d ms", g_offset_ms, (int)lround(g_vis_off * 1000.0));
+  utext(ren, SCR_W - 16 - utext_w(ren, l, 1), 22, l, 1, 190, 190, 205, 255);
+
+  const int x_list = 20, x_badge = 440, row_h = 30, y0 = 74;
+  for (int r = 0; r < rows && top + r < items; r++) {
+    int it = top + r, y = y0 + r * row_h;
+    if (it == sel) {
+      col(ren, 255, 255, 255, 38);
+      rect(ren, 8, (float)y - 3, SCR_W - 16, row_h - 2);
+      col(ren, 250, 200, 40, 255);
+      rect(ren, 8, (float)y - 3, 4, row_h - 2);
+    }
+    if (it == 0) {
+      utext_s(ren, x_list, y + 2, "[ Calibration ]", 2, 130, 240, 150, 255);
+      continue;
+    }
+    const Song *s = &songs[it - 1];
+    int maxw = x_badge - x_list - 12;
+    if (it == sel && utext_w(ren, s->label, 2) > maxw) {
+      /* the selected title scrolls instead of being cut off */
+      int w = utext_w(ren, s->label, 2), gap = 80;
+      double off = fmod(t * 45.0, (double)(w + gap));
+      SDL_Rect clip = {x_list, y - 2, maxw, row_h};
+      SDL_SetRenderClipRect(ren, &clip);
+      utext_s(ren, x_list - (int)off, y + 2, s->label, 2, 255, 255, 255, 255);
+      utext_s(ren, x_list - (int)off + w + gap, y + 2, s->label, 2, 255, 255, 255, 255);
+      SDL_SetRenderClipRect(ren, NULL);
+    } else {
+      utext_fit(ren, x_list, y + 2, maxw, s->label, 2, it == sel ? 255 : 205, it == sel ? 255 : 205, it == sel ? 255 : 215);
+    }
+    /* fixed-width course column: it can never be covered by a title */
+    int id = s->ids[cidx[it - 1]];
+    const TjaCourse *c = tja_course(&s->tja, id);
+    int R, G, B;
+    course_rgb(id, &R, &G, &B);
+    snprintf(l, sizeof l, "%s \xE2\x98\x85%d", course_name(id), c ? c->level : 0);
+    pill(ren, x_badge + 22, y, 150, 22, R, G, B);
+    utext(ren, x_badge + 22 + 75 - utext_w(ren, l, 1) / 2, y + 3, l, 1, 255, 255, 255, 255);
+    if (it == sel) {
+      utext_s(ren, x_badge, y + 3, "<", 2, 255, 214, 60, 255);
+      utext_s(ren, x_badge + 22 + 150 + 4, y + 3, ">", 2, 255, 214, 60, 255);
+    }
+  }
+  if (n_songs == 0) utext_s(ren, 20, 110, "no songs found", 2, 255, 255, 255, 255);
+  col(ren, 0, 0, 0, 150);
+  rect(ren, 0, SCR_H - 26, SCR_W, 26);
+  utext(ren, 12, SCR_H - 22, "UP/DOWN song   LEFT/RIGHT course   A play   SELECT+START quit", 1, 190, 190, 205, 255);
+}
 
 static Choice menu_run(SDL_Renderer *ren, int *sel_io, int *cidx) {
   Choice ch = {0, 0, -1, 0};
@@ -985,41 +1320,7 @@ static Choice menu_run(SDL_Renderer *ren, int *sel_io, int *cidx) {
     if (sel < top) top = sel;
     if (sel >= top + rows) top = sel - rows + 1;
 
-    SDL_SetRenderDrawColor(ren, 22, 22, 30, 255);
-    SDL_RenderClear(ren);
-    SDL_SetRenderDrawColor(ren, 250, 220, 90, 255);
-    text(ren, 16, 14, 3, "TAIKO");
-    SDL_SetRenderDrawColor(ren, 150, 150, 165, 255);
-    char l[96];
-    snprintf(l, sizeof l, "judge %+d ms   visual %+d ms", g_offset_ms, (int)lround(g_vis_off * 1000.0));
-    text(ren, SCR_W - 16 - (float)strlen(l) * 8, 22, 1, l);
-    for (int r = 0; r < rows && top + r < items; r++) {
-      int it = top + r;
-      float y = 64 + (float)r * 30;
-      if (it == sel) {
-        SDL_SetRenderDrawColor(ren, 60, 60, 84, 255);
-        SDL_FRect hl = {8, y - 6, SCR_W - 16, 28};
-        SDL_RenderFillRect(ren, &hl);
-      }
-      if (it == 0) {
-        SDL_SetRenderDrawColor(ren, 120, 230, 140, 255);
-        text(ren, 20, y, 2, "[ Calibration ]");
-        continue;
-      }
-      Song *s = &songs[it - 1];
-      SDL_SetRenderDrawColor(ren, 235, 235, 240, 255);
-      char lab[40];
-      snprintf(lab, sizeof lab, "%.38s", s->label);
-      text(ren, 20, y, 2, lab);
-      const TjaCourse *c = tja_course(&s->tja, s->ids[cidx[it - 1]]);
-      snprintf(l, sizeof l, "%s%s%s lv%d", it == sel ? "< " : "", course_name(s->ids[cidx[it - 1]]),
-               it == sel ? " >" : "", c ? c->level : 0);
-      SDL_SetRenderDrawColor(ren, it == sel ? 250 : 170, it == sel ? 200 : 170, it == sel ? 40 : 180, 255);
-      text(ren, SCR_W - 20 - (float)strlen(l) * 16, y, 2, l);
-    }
-    SDL_SetRenderDrawColor(ren, 150, 150, 165, 255);
-    text(ren, 16, SCR_H - 22, 1, "UP/DOWN select   LEFT/RIGHT course   A play   SELECT+START quit");
-    if (n_songs == 0) text(ren, 20, 110, 2, "no songs found");
+    draw_menu(ren, sel, top, rows, items, cidx);
     present(ren);
   }
   ch.quit = 1;
@@ -1062,6 +1363,8 @@ int main(int argc, char **argv) {
     if (n >= 2) g_vis_off = vis / 1000.0;
     fclose(cf);
   }
+
+  if (load_font(bp ? bp : "./") != 0) fprintf(stderr, "taiko: no unifont.bin, ASCII-only text\n");
 
   if (!SDL_Init(SDL_INIT_VIDEO | (dump ? 0 : SDL_INIT_AUDIO) | SDL_INIT_GAMEPAD)) {
     fprintf(stderr, "taiko: SDL_Init: %s\n", SDL_GetError());
@@ -1131,6 +1434,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "taiko: %d songs in %s\n", n_songs, songs_dir);
     int *cidx = calloc((size_t)(n_songs ? n_songs : 1), sizeof(int));
     int sel = n_songs ? 1 : 0;
+    if (getenv("TAIKO_MENU_SEL")) sel = atoi(getenv("TAIKO_MENU_SEL"));
     if (screen && !strcmp(screen, "calibrate")) calibrate_run(ren);
     else
     while (!quit_flag) {

@@ -45,10 +45,11 @@ Open work and what is already done. Facts learned along the way go in
 - [x] `.tja` parser and timeline compiler, judgement engine, host tests
 - [x] Playable on device: menu (song, course), calibration (judgement and
   visual offset), results, don/ka sounds, D-pad as don
-- [ ] Song titles in Japanese/Chinese (reuse `unifont.bin`)
+- [x] Arcade-style look: Unifont text (Japanese titles, kanji judgements), soul
+  gauge with clear line, drum, combo, hit effects, GOGO flames, course colours
 - [ ] Pause, retry from the results screen, remember the last song
 - [ ] Wrong-colour hit = bad, big notes needing two hits, per-difficulty
-  judgement windows, exact score rules, soul gauge and clear/fail
+  judgement windows, exact score rules, gauge tuning
 - [ ] Branches (`#N/#E/#M` follow the player), `#NEXTSONG` medleys/dan
 - [ ] Song sync script (convert Shift-JIS charts to UTF-8 on the Mac)
 - [ ] Measure true audio latency externally to explain the ~-100 ms tap offset
