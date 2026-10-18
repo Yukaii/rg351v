@@ -10,6 +10,9 @@ Linux 4.4.189). The apps run on the handheld; build and management scripts
 run on a Mac and connect over SSH. This is a personal homebrew collection;
 each app has its own setup steps.
 
+Using a coding agent? Point it at [AGENTS.md](AGENTS.md) for the device
+context, build workflows and safety rules, then tell it what you want to do.
+
 ## Apps
 
 | App | What you can do |
@@ -31,6 +34,23 @@ access to the handheld. The helpers use Bash, Python 3, SSH and rsync;
 native builds also need Docker with Linux/aarch64 containers. Individual
 apps and sync tools have additional dependencies documented in their guides
 or script headers.
+
+### With a coding agent
+
+Open this repository in your coding agent and give it a task like:
+
+```text
+Read AGENTS.md and docs/gotchas.md, then help me set up [app or feature]
+on my RG351V. Check my Mac's dependencies and SSH access first, then follow
+the documented build and deployment workflow.
+```
+
+`AGENTS.md` provides the project layout, device constraints, testing steps
+and precautions for making changes. The app guides and troubleshooting notes
+provide the details for your chosen task. You still need the hardware and
+SSH access described above.
+
+### From the terminal
 
 From the repository directory, check your connection and device:
 

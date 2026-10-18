@@ -57,7 +57,8 @@ Open work and what is already done. Facts learned along the way go in
 ## Done
 
 - [x] Add a GitHub repository description and refresh the README with app
-  guides, prerequisites, device helpers and development links
+  guides, prerequisites, an agent onboarding prompt, device helpers and
+  development links
 - [x] Prepare for publication: audit tracked files and Git history, generalize
   the Mac hostname, ignore stray credential files and document project licenses
 - [x] Flashed `AmberELEC-RG351V.aarch64-20230203.img` to SD1 (replaced 351ELEC)
