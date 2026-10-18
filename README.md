@@ -1,77 +1,84 @@
-# rg351v
+# RG351V homebrew
 
-Notes, scripts and tweaks for my Anbernic RG351V handheld running AmberELEC
-(RK3326, aarch64, Linux 4.4). Everything is driven from a Mac over SSH; this
-repo is the Mac side plus the apps cross-built for the device.
+Music, rhythm games, flashcards, video and a BBS terminal for the
+**Anbernic RG351V**, with interfaces built around its physical controls.
+Also includes tools to sync games and saves, remember Wi-Fi networks and
+put the handheld to sleep when idle.
 
-## What is here
+Developed and used on **AmberELEC Community 20230203** (RK3326, aarch64,
+Linux 4.4.189). The apps run on the handheld; build and management scripts
+run on a Mac and connect over SSH. This is a personal homebrew collection;
+each app has its own setup steps.
 
-| | |
+## Apps
+
+| App | What you can do |
 |---|---|
-| **deck** | Spotify player with a retro UI: now playing, liked songs, albums, playlists, search, queue, album art (`apps/deck`, daemon `apps/deckd`) |
-| **Auto-suspend** | suspends after 5 idle minutes unless charging, SSH, busy Wi-Fi, music or video |
-| **ptterm** | tiny SDL3 BBS terminal for PTT with an on-screen keyboard |
-| **YouTube** | Homebrew browser with search, thumbnails, saved videos and 360p playback ([usage](apps/youtube/README.md)) |
-| **Anki** | Gamepad flashcard reviewer with offline reviews and manual AnkiWeb collection/media sync ([usage](apps/anki/README.md)) |
-| **Ports / homebrew** | Pikachu Volleyball, KOReader built or repackaged for KMSDRM |
-| **Sync** | games from RomM, save backup/restore, Wi-Fi network memory |
-| **Monitoring** | perf snapshot, battery sampler, CPU/GPU/backlight tuning |
+| [deck](apps/deck/README.md) | Play Spotify with a retro UI, album art, library browsing, search and a queue. Requires Spotify Premium; online playback only. |
+| [Taiko](apps/taiko/README.md) | Play your own TJA charts with gamepad drumming, calibration, combo effects and a soul gauge. Some chart and scoring features are still in progress. |
+| [Anki](apps/anki/README.md) | Review flashcards offline with physical buttons, then manually sync with AnkiWeb. Supports basic/cloze cards, images and local audio; rendering is limited. |
+| [YouTube](apps/youtube/README.md) | Search, save and watch videos on the handheld, with tested 360p playback. Preparing a video can take tens of seconds. |
+| [ptterm](apps/ptterm/src/main.c) | Browse PTT through a Big5-UAO terminal with CJK text and an on-screen keyboard. |
+| Other ports | Read books with KOReader or play Pikachu Volleyball using the included build/deployment helpers. External port sources or downloads are required. |
 
-Open work: [TODO.md](TODO.md). What went wrong and what was measured:
-[docs/gotchas.md](docs/gotchas.md). Repo conventions and layout for agents:
-[AGENTS.md](AGENTS.md).
+Follow the linked app guides for installation, controls and current limits.
+See [TODO.md](TODO.md) for verified work and remaining features.
 
-## Device
+## Get started
 
-| | |
-|---|---|
-| Hardware | Anbernic RG351V (RK3326, 4 cores, aarch64) |
-| RAM | ~926 MB |
-| OS | AmberELEC Community 20230203 |
-| Kernel | Linux 4.4.189 |
-| Storage | `/flash` 2.0G (boot), `/storage` 1.9G (system/config), `/storage/roms` 10.5G (games, `mmcblk0p3`) |
-| Network | Wi-Fi `wlan0` (USB MT7601U); SSH (22), SMB (139/445) |
-| Tools on device | python3, git, curl, wget, rsync, nano (no gcc) |
+You need an RG351V running AmberELEC, Wi-Fi, and a Mac with working SSH key
+access to the handheld. The helpers use Bash, Python 3, SSH and rsync;
+native builds also need Docker with Linux/aarch64 containers. Individual
+apps and sync tools have additional dependencies documented in their guides
+or script headers.
 
-## Access
+From the repository directory, check your connection and device:
 
 ```sh
-ssh root@RG351V.local       # key auth; DHCP may move the IP
-smb://RG351V.local          # network share (roms, bios, saves)
+ssh root@RG351V.local
+# Run exit to return to the Mac, then:
+bash scripts/info.sh
 ```
 
-Optional `~/.ssh/config` entry:
-
-```
-Host rg351v
-  HostName RG351V.local
-  User root
-  IdentityFile ~/.ssh/id_ecdsa
-```
-
-## Quick start
+The default target is `root@RG351V.local`. To use another address, set
+`RG351V_HOST` before running a helper:
 
 ```sh
-bash scripts/info.sh                                  # power, OS, memory, disk, network
-
-# Spotify player (Premium; first login from a phone: Connect devices -> RG351V)
-scripts/spotify.sh build && scripts/spotify.sh install
-scripts/build-port.sh deck && scripts/deploy-port.sh deck   # Homebrew > Spotify
-
-scripts/autosleep.sh install 5                        # idle auto-suspend
-scripts/sync.sh --pick                                # games from RomM
-scripts/saves.sh backup                               # saves to the Mac
+export RG351V_HOST=root@your-device-address
 ```
 
-Scripts need Docker for cross-builds (aarch64 containers) and read the target
-from `RG351V_HOST` (default `root@RG351V.local`). The device sleeps after 5 idle
-minutes and drops off the network; wake it with the power key.
+Write helpers verify that the remote hostname is `RG351V`. If the handheld
+has gone to sleep, wake it with the power key before connecting. Files can
+also be transferred through `smb://RG351V.local` in Finder.
 
-## Status
+## Device helpers
 
-Device is flashed, networked and in daily use; the Spotify player, auto-suspend
-and the suspend-crash fix are done and verified on hardware. See
-[TODO.md](TODO.md) for what is open. Per-app docs: [apps/deck](apps/deck/README.md).
+Run these from the Mac after setting up SSH access:
+
+```sh
+bash scripts/saves.sh backup          # back up game saves to the Mac
+bash scripts/sync.sh --pick           # choose games from your configured RomM server
+bash scripts/wifi.sh install          # remember networks saved in the device's Wi-Fi menu
+bash scripts/autosleep.sh install 5   # suspend after five idle minutes
+bash scripts/perf.sh                  # inspect CPU, GPU, temperature and power
+```
+
+Auto-suspend stays awake while charging, during an open SSH session, with
+busy Wi-Fi, or while supported music/video playback is active. Backups,
+credentials and build output belong in the ignored `.storage/` directory.
+
+## Development and troubleshooting
+
+Native C/SDL apps use `scripts/build-port.sh <name>` and
+`scripts/deploy-port.sh <name>`. Spotify's Rust daemon uses
+`scripts/spotify.sh build` and `scripts/spotify.sh install`. Follow each
+app's guide for required assets and setup before deploying.
+
+- [Troubleshooting and measurements](docs/gotchas.md): sleep, audio, video,
+  networking and hardware-specific lessons.
+- [Roadmap](TODO.md): open work and completed milestones.
+- [Repository conventions](AGENTS.md): project layout, build conventions
+  and device safety rules.
 
 ## License
 
