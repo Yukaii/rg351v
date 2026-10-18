@@ -72,3 +72,17 @@ minutes and drops off the network; wake it with the power key.
 Device is flashed, networked and in daily use; the Spotify player, auto-suspend
 and the suspend-crash fix are done and verified on hardware. See
 [TODO.md](TODO.md) for what is open. Per-app docs: [apps/deck](apps/deck/README.md).
+
+## License
+
+Copyright (c) 2026 Yukai Huang. Original code and documentation are licensed
+under [GPL-2.0-or-later](LICENSE), except where another license is stated:
+
+- `apps/deckd/` and `apps/pocketjs-host/` use MIT; each has its own `LICENSE`.
+- `scripts/ports/koreader/launcher.sh` uses
+  [AGPL-3.0-or-later](LICENSES/AGPL-3.0-or-later.txt).
+- Vendored libraries retain the license and copyright notices in their files.
+
+Downloaded dependencies, fonts, firmware and external ports retain their
+upstream licenses. This repository's license does not relicense those assets.
+Personal credentials, ROMs, BIOS files and song libraries are not included.

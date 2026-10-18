@@ -56,6 +56,8 @@ Open work and what is already done. Facts learned along the way go in
 
 ## Done
 
+- [x] Prepare for publication: audit tracked files and Git history, generalize
+  the Mac hostname, ignore stray credential files and document project licenses
 - [x] Flashed `AmberELEC-RG351V.aarch64-20230203.img` to SD1 (replaced 351ELEC)
 - [x] First boot, Wi-Fi, SSH key auth, root password changed (stored outside the repo)
 - [x] Charging works with a proper charger

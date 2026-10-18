@@ -18,7 +18,7 @@ matching heading (or a new one), with the date when it is a measurement.
   default to `root@RG351V.local`, force IPv4 (`-4`; mDNS also resolves a
   link-local IPv6 address with a conflicting host key), and refuse to run when
   the remote hostname is not `RG351V`.
-- This Mac is `ykmadeair.local`. If an SSH session answers with that hostname or
+- If an SSH session answers with your Mac's hostname (e.g. `your-mac.local`) or
   shows macOS paths (`/etc/cups`, no `/storage`), the command ran locally
   because the `ssh` prefix was missing. Sanity-check with `hostname`.
 - After a DHCP change, SSH fails with "Host key verification failed": clear the
@@ -32,6 +32,13 @@ matching heading (or a new one), with the date when it is a measurement.
   `guest account = root`, i.e. anyone on the LAN can read AND write
   `/storage/roms` as root without a password (incl. launcher `.sh` files).
   `/storage` itself is not shared; keep secrets there, never under roms.
+- Publication audit (2026-10-18): Gitleaks found no secrets in the locally
+  reachable Git history; a separate history search found no credential files,
+  private keys or password hashes. `.storage/` was never tracked in that
+  history. Older commits retain a private LAN IP and personal Mac hostname;
+  commit metadata retains the author's name and email. These were kept when
+  preparing the repository for publication. Keep local credentials under
+  `.storage/`; the additional credential-file ignore rules are a fallback.
 - Wi-Fi is single-SSID in the ES menu: `batocera-config wifi enable` rewrites
   `/storage/.cache/connman/wifi.config` (one fixed `service_amberelec_default`
   block) on every save. connman reads every `*.config` in that directory live.
